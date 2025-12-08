@@ -410,7 +410,7 @@ if pending_tool_calls:
     )
     output_text = followup.output_text
 
-    return output_text
+ return output_text
 
 
 # =========================
