@@ -1,0 +1,14 @@
+streamlit
+openai
+faiss-cpu
+numpy
+pickle-mixin
+PyMuPDF
+google-api-python-client
+google-auth
+PyPDF2
+google-auth-httplib2
+google-auth-oauthlib
+python-docx
+PyJWT
+requests
