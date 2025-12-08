@@ -285,8 +285,12 @@ def lookup_rule_tool(appendix_or_part, paragraph_ref=None, query=None):
 def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filter_mode=None):
     """
     Checklist generation using Responses API + lookup_rule tool.
-    Correctly resumes state after tool calls via previous_response_id.
-    Robust to SDK output shape differences and tool-call id variants.
+
+    Fixes:
+    - Reads text from resp.output_text as well as resp.output items.
+    - Guarantees valid call_id for function_call_output.
+    - If call_id can't be recovered, falls back to a second full call
+      (instead of previous_response_id), which avoids BadRequest.
     """
     rule_date = fetch_latest_rule_update_date()
     system_prompt = BASE_SYSTEM_PROMPT.replace("{RULE_UPDATE_DATE}", rule_date)
@@ -370,10 +374,12 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
                     setattr(o, k, v)
                 yield o
 
-    output_text = ""
+    # 1) text might already be here
+    output_text = getattr(resp, "output_text", "") or ""
     pending_tool_calls = []
 
-    for item in iter_items(resp.output):
+    # 2) also scan resp.output for text + tool calls
+    for item in iter_items(getattr(resp, "output", None)):
         if item.type in ("tool_call", "function_call") and getattr(item, "name", None) == "lookup_rule":
             pending_tool_calls.append(item)
         elif item.type == "output_text":
@@ -382,6 +388,7 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
     # ---- Tool resolve + follow-up ----
     if pending_tool_calls:
         tool_outputs = []
+        missing_call_ids = False
 
         for tc in pending_tool_calls:
             raw_args = getattr(tc, "arguments", None) or "{}"
@@ -396,20 +403,22 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
             else:
                 args = {}
 
-            appendix_or_part = args.get("appendix_or_part", "").strip()
-            if not appendix_or_part:
-                tool_result = {
-                    "error": "appendix_or_part missing from tool call",
-                    "arguments": args
-                }
-            else:
-                tool_result = lookup_rule_tool(
-                    appendix_or_part=appendix_or_part,
-                    paragraph_ref=args.get("paragraph_ref"),
-                    query=args.get("query"),
-                )
+            appendix_or_part = (args.get("appendix_or_part") or "").strip()
+            tool_result = lookup_rule_tool(
+                appendix_or_part=appendix_or_part,
+                paragraph_ref=args.get("paragraph_ref"),
+                query=args.get("query"),
+            )
 
-            call_id = getattr(tc, "id", None) or getattr(tc, "call_id", None)
+            # Try every reasonable id field
+            call_id = (
+                getattr(tc, "id", None)
+                or getattr(tc, "call_id", None)
+                or getattr(tc, "tool_call_id", None)
+            )
+
+            if not call_id:
+                missing_call_ids = True
 
             tool_outputs.append({
                 "type": "function_call_output",
@@ -417,20 +426,53 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
                 "output": json.dumps(tool_result),
             })
 
-        followup = client.responses.create(
-            model="gpt-5.1",
-            previous_response_id=resp.id,
-            input=tool_outputs,
-            temperature=0.2,
-        )
+        if not missing_call_ids:
+            # Preferred: resume thread safely
+            followup = client.responses.create(
+                model="gpt-5.1",
+                previous_response_id=resp.id,
+                input=tool_outputs,
+                temperature=0.2,
+            )
+            output_text = getattr(followup, "output_text", "") or ""
+            if not output_text:
+                for item in iter_items(getattr(followup, "output", None)):
+                    if item.type == "output_text":
+                        output_text += item.text
+        else:
+            # Fallback: second full call (no previous_response_id)
+            # This avoids BadRequest when call_id is missing.
+            followup = client.responses.create(
+                model="gpt-5.1",
+                input=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": grounding_context},
+                    {"role": "user", "content": user_instruction},
+                    {"role": "assistant", "content": "Tool results provided. Continue and produce final checklist."},
+                    *[
+                        {
+                            "role": "tool",
+                            "tool_call_id": (getattr(tc, "id", None) or getattr(tc, "call_id", None) or ""),
+                            "content": json.dumps(
+                                lookup_rule_tool(
+                                    appendix_or_part=(json.loads(getattr(tc, "arguments", "{}")) or {}).get("appendix_or_part", ""),
+                                    paragraph_ref=(json.loads(getattr(tc, "arguments", "{}")) or {}).get("paragraph_ref"),
+                                    query=(json.loads(getattr(tc, "arguments", "{}")) or {}).get("query"),
+                                )
+                            ),
+                        }
+                        for tc in pending_tool_calls
+                    ]
+                ],
+                temperature=0.2,
+            )
+            output_text = getattr(followup, "output_text", "") or ""
+            if not output_text:
+                for item in iter_items(getattr(followup, "output", None)):
+                    if item.type == "output_text":
+                        output_text += item.text
 
-        output_text = getattr(followup, "output_text", "") or ""
-        if not output_text:
-            for item in iter_items(getattr(followup, "output", None)):
-                if item.type == "output_text":
-                    output_text += item.text
-
-    return output_text.strip()
+    return (output_text or "").strip()
 
 
 # =========================
