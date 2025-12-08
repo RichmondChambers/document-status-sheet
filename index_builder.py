@@ -1,10 +1,11 @@
 import os
 import io
+import re
 import json
 import pickle
 import time
 import datetime
-from typing import List, Dict
+from typing import List, Dict, Optional, Tuple
 
 import numpy as np
 import faiss
@@ -18,31 +19,32 @@ from openai import OpenAI, RateLimitError, APIConnectionError, APITimeoutError
 
 import streamlit as st
 
-# 🔹 Folder ID of your UK-Immigration-Knowledge folder in Drive
-DRIVE_FOLDER_ID = "13J-DiERhtS1VWgF2GtZ1wnMfbUzkq6-G"
+# ============================================================
+# ONLY THESE TWO FOLDERS WILL BE INDEXED
+# ============================================================
+
+# ✅ Immigration Rules folder (authoritative)
+IMMIGRATION_RULES_FOLDER_ID = "1BGrO2uRTO0axcLE7pwGpv_1EONb25vYe"
+
+# ✅ Internal Precedents folder (style / best practice)
+INTERNAL_PRECEDENTS_FOLDER_ID = "1VY2dCt5KgAkgofn0eSDrZWI5zhXQMwaT"
 
 # 🔹 Local files the app uses
 INDEX_FILE = "faiss_index.index"
 METADATA_FILE = "metadata.pkl"
-STATE_FILE = "drive_index_state.json"  # to detect changes + store timestamps
+STATE_FILE = "drive_index_state.json"
 
 # ✅ Check Drive at most once per day (global cooldown)
 CHECK_COOLDOWN_SECONDS = 24 * 60 * 60  # 1 day
 
 
 def get_openai_client() -> OpenAI:
-    """
-    Create an OpenAI client using Streamlit secrets.
-    Keeps index_builder aligned with app.py SDK usage.
-    """
+    """Create an OpenAI client using Streamlit secrets."""
     return OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 
 def get_drive_service():
-    """
-    Build an authenticated Google Drive API client using the service account
-    stored in st.secrets["gcp_service_account"].
-    """
+    """Build an authenticated Google Drive API client using a service account."""
     creds_info = st.secrets["gcp_service_account"]
     credentials = service_account.Credentials.from_service_account_info(
         creds_info,
@@ -52,41 +54,67 @@ def get_drive_service():
     return service
 
 
-def list_files_recursive(folder_id: str, service) -> List[Dict]:
+# =========================
+# 1) List files WITH path
+# =========================
+def list_files_recursive(folder_id: str, service, path_prefix: str = "") -> List[Dict]:
     """
-    Recursively list all non-folder files under a Drive folder (including sub-folders).
+    Recursively list all non-folder files under a Drive folder (including sub-folders),
+    preserving a human-readable folder path.
+
+    Each file dict includes:
+      - id, name, mimeType, modifiedTime, parents
+      - path (like "Immigration Rules/Appendix FM.pdf")
     """
     files: List[Dict] = []
-
     page_token = None
+
     while True:
         response = service.files().list(
             q=f"'{folder_id}' in parents and trashed = false",
-            fields="nextPageToken, files(id, name, mimeType, modifiedTime)",
+            fields="nextPageToken, files(id, name, mimeType, modifiedTime, parents)",
             pageToken=page_token,
         ).execute()
 
         for f in response.get("files", []):
             mime_type = f.get("mimeType", "")
+            name = f.get("name", "")
             if mime_type == "application/vnd.google-apps.folder":
-                files.extend(list_files_recursive(f["id"], service))
+                child_prefix = f"{path_prefix}/{name}" if path_prefix else name
+                files.extend(list_files_recursive(f["id"], service, child_prefix))
             else:
+                f["path"] = f"{path_prefix}/{name}" if path_prefix else name
                 files.append(f)
 
-        page_token = response.get("nextPageToken", None)
+        page_token = response.get("nextPageToken")
         if page_token is None:
             break
 
     return files
 
 
-def list_drive_files() -> List[Dict]:
+def list_drive_files_only_target_folders() -> List[Tuple[Dict, str]]:
     """
-    Return a list of all files (id, name, mimeType, modifiedTime)
-    under the main knowledge folder (including sub-folders).
+    Return a list of (file_dict, source_type) for ONLY:
+      - Immigration Rules folder -> "rule"
+      - Internal Precedents folder -> "precedent"
     """
     service = get_drive_service()
-    return list_files_recursive(DRIVE_FOLDER_ID, service)
+
+    rule_files = list_files_recursive(
+        IMMIGRATION_RULES_FOLDER_ID, service, "Immigration Rules"
+    )
+    precedent_files = list_files_recursive(
+        INTERNAL_PRECEDENTS_FOLDER_ID, service, "Internal Precedents"
+    )
+
+    tagged: List[Tuple[Dict, str]] = []
+    for f in rule_files:
+        tagged.append((f, "rule"))
+    for f in precedent_files:
+        tagged.append((f, "precedent"))
+
+    return tagged
 
 
 def load_previous_state():
@@ -101,11 +129,12 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 
-def have_files_changed(current_files, previous_state):
+def have_files_changed(tagged_files: List[Tuple[Dict, str]], previous_state):
     """
-    Compare current Drive files with previous state to see if anything is new or modified.
+    Compare current Drive files (only the two target folders)
+    with previous state to see if anything is new or modified.
     """
-    current_state = {f["id"]: f["modifiedTime"] for f in current_files}
+    current_state = {f["id"]: f["modifiedTime"] for (f, _) in tagged_files}
     if current_state != previous_state.get("files", {}):
         return True, current_state
     return False, current_state
@@ -113,8 +142,8 @@ def have_files_changed(current_files, previous_state):
 
 def download_file_bytes(service, file):
     """
-    Download the raw bytes of a file from Google Drive.
-    Handles both normal files (pdf/docx/txt) and Google Docs (exported as DOCX).
+    Download raw bytes of a file from Google Drive.
+    Handles normal files and Google Docs (exported as DOCX).
     """
     file_id = file["id"]
     mime_type = file.get("mimeType", "")
@@ -139,10 +168,7 @@ def download_file_bytes(service, file):
 
 
 def extract_text_from_bytes(file_bytes: bytes, mime_type: str, file_name: str) -> str:
-    """
-    Convert downloaded bytes into plain text, depending on MIME type / extension.
-    Supports DOCX, PDF, TXT, MD. Extend if needed.
-    """
+    """Convert downloaded bytes into plain text."""
     name_lower = file_name.lower()
 
     if (
@@ -171,24 +197,48 @@ def extract_text_from_bytes(file_bytes: bytes, mime_type: str, file_name: str) -
         return ""
 
 
-def split_into_chunks(text: str, max_chars: int = 1500, overlap: int = 200):
+def normalise_rule_text(text: str) -> str:
+    """Light normalisation to improve paragraph-ref matching."""
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def split_into_chunks(text: str, max_chars: int = 1800, overlap: int = 200):
     """
-    Simple character-based chunking with overlap.
+    Paragraph-aware chunking:
+    - splits on blank lines
+    - rebuilds into chunks up to max_chars
+    - adds overlap by prefixing with tail of previous chunk
     """
     text = text.strip()
     if not text:
         return []
 
+    paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
     chunks = []
-    start = 0
-    length = len(text)
+    current = ""
 
-    while start < length:
-        end = start + max_chars
-        chunks.append(text[start:end])
-        start = end - overlap
-        if start < 0:
-            start = 0
+    for p in paras:
+        if len(current) + len(p) + 2 <= max_chars:
+            current = f"{current}\n\n{p}".strip()
+        else:
+            if current:
+                chunks.append(current)
+            current = p
+
+    if current:
+        chunks.append(current)
+
+    if overlap and len(chunks) > 1:
+        overlapped = []
+        for i, ch in enumerate(chunks):
+            if i == 0:
+                overlapped.append(ch)
+                continue
+            prev_tail = chunks[i - 1][-overlap:]
+            overlapped.append(prev_tail + "\n\n" + ch)
+        chunks = overlapped
 
     return chunks
 
@@ -199,17 +249,14 @@ def embed_texts(
     batch_size=16,
     max_retries=6
 ) -> np.ndarray:
-    """
-    Get embeddings for a list of texts using OpenAI embeddings API,
-    retrying only transient failures and failing fast on real config errors.
-    """
+    """Batch embeddings with retry on transient failures."""
     client = get_openai_client()
     all_embeddings = []
 
     for i in range(0, len(texts), batch_size):
-        batch = texts[i : i + batch_size]
-
+        batch = texts[i: i + batch_size]
         attempts = 0
+
         while True:
             try:
                 response = client.embeddings.create(
@@ -217,8 +264,7 @@ def embed_texts(
                     model=model,
                     timeout=30,
                 )
-                break  # success
-
+                break
             except (RateLimitError, APIConnectionError, APITimeoutError) as e:
                 attempts += 1
                 if attempts > max_retries:
@@ -226,16 +272,10 @@ def embed_texts(
                         f"OpenAI embeddings failed after {max_retries} retries. Last error: {e}"
                     )
                 wait_seconds = 5 * attempts
-                print(
-                    f"[index_builder] Transient error, retry {attempts}/{max_retries} in {wait_seconds}s: {e}"
-                )
+                print(f"[index_builder] Transient error, retry {attempts}/{max_retries} in {wait_seconds}s: {e}")
                 time.sleep(wait_seconds)
-
             except Exception as e:
-                # Non-transient errors should stop the rebuild immediately
-                raise RuntimeError(
-                    f"OpenAI embeddings failed with a non-retryable error: {e}"
-                )
+                raise RuntimeError(f"OpenAI embeddings failed with a non-retryable error: {e}")
 
         for item in response.data:
             all_embeddings.append(item.embedding)
@@ -243,29 +283,107 @@ def embed_texts(
     return np.array(all_embeddings, dtype=np.float32)
 
 
-def rebuild_index_from_drive(files: List[Dict]):
+def infer_appendix_or_part(file_name: str) -> Optional[str]:
+    """Heuristic appendix/part label from filename."""
+    name = file_name.lower()
+
+    m = re.match(r"(appendix\s+[a-z0-9\- ]+)", name)
+    if m:
+        return m.group(1).title()
+
+    m = re.match(r"(part\s+\d+)", name)
+    if m:
+        return m.group(1).title()
+
+    return None
+
+
+def extract_paragraph_refs(chunk: str) -> Optional[List[str]]:
     """
-    Download files, extract text, chunk, embed, and rebuild FAISS + metadata.
+    Extract Immigration Rules paragraph references from a chunk.
+
+    Returns list[str] or None.
+    Handles:
+      - Appendix FM / FM-SE codes: E-ECP.2.1., R-LTRP.1.1., GEN.3.1., EX.1., etc.
+      - Skilled Worker shorthand: SW 1.1, SW 16.2A, etc.
+      - Appendix codes with hyphens: E-LTRP.2.2., D-ECPT.1.1., etc.
+      - Plain numeric paras like 9.1.1 / 9.2A when context indicates rules.
+      - Range expressions capturing both ends.
+    """
+    text = chunk
+    refs = set()
+
+    # 1) FM / FM-SE / appendix dot codes ending in '.'
+    fm_like = re.findall(
+        r"\b([A-Z]{1,2}(?:-[A-Z]{2,6})?\.\d+(?:\.\d+)*[A-Z]?\.)\b",
+        text
+    )
+    refs.update(fm_like)
+
+    # 2) GEN / EX / suitability etc explicit blocks
+    gen_ex = re.findall(
+        r"\b((?:GEN|EX|S-EC|S-LTR|S-ILR|EC-PPT|ECP|LTRP)\.\d+(?:\.\d+)*[A-Z]?\.)\b",
+        text
+    )
+    refs.update(gen_ex)
+
+    # 3) Shorthand blocks (Skilled Worker etc)
+    shorthand = re.findall(
+        r"\b([A-Z]{1,4})\s(\d+(?:\.\d+)*[A-Z]?)\b",
+        text
+    )
+    allowed_blocks = {"SW", "V", "EL", "HCCW", "GBM", "T5", "T2", "PBS", "FIN"}
+    for block, num in shorthand:
+        if block in allowed_blocks:
+            refs.add(f"{block} {num}")
+
+    # 4) Numeric paras in context (Part 9 etc)
+    numeric_context = re.findall(
+        r"(?:paragraph|para|part|rule|under)\s+(\d+(?:\.\d+){1,3}[A-Z]?)\b",
+        text,
+        flags=re.IGNORECASE
+    )
+    refs.update(numeric_context)
+
+    # 5) Ranges like “E-ECP.2.1. to E-ECP.2.3.”
+    ranges = re.findall(
+        r"\b([A-Z]{1,2}(?:-[A-Z]{2,6})?\.\d+(?:\.\d+)*[A-Z]?\.)\s*(?:to|\-|–)\s*([A-Z]{1,2}(?:-[A-Z]{2,6})?\.\d+(?:\.\d+)*[A-Z]?\.)\b",
+        text
+    )
+    for start, end in ranges:
+        refs.add(start)
+        refs.add(end)
+
+    if not refs:
+        return None
+
+    return sorted(refs)
+
+
+def rebuild_index_from_drive(tagged_files: List[Tuple[Dict, str]]):
+    """
+    Download files, extract text, chunk, embed, and rebuild FAISS + metadata
+    from ONLY the two target folders.
     """
     service = get_drive_service()
     all_chunks = []
     metadata = []
 
-    for file in files:
+    for file, source_type in tagged_files:
         file_id = file["id"]
         file_name = file.get("name", "unnamed")
         mime_type = file.get("mimeType", "")
-
-        if mime_type == "application/vnd.google-apps.folder":
-            continue
+        file_path = file.get("path", file_name)
 
         file_bytes, effective_mime = download_file_bytes(service, file)
 
         text = extract_text_from_bytes(file_bytes, effective_mime, file_name)
+        text = normalise_rule_text(text)
         if not text.strip():
             continue
 
         chunks = split_into_chunks(text)
+        appendix_or_part = infer_appendix_or_part(file_name)
 
         for idx, chunk in enumerate(chunks):
             all_chunks.append(chunk)
@@ -274,12 +392,19 @@ def rebuild_index_from_drive(files: List[Dict]):
                     "content": chunk,
                     "file_id": file_id,
                     "file_name": file_name,
+                    "file_path": file_path,
                     "chunk_index": idx,
+
+                    # ✅ Used by app.py
+                    "type": source_type,  # "rule" or "precedent"
+                    "source": file_name,
+                    "appendix_or_part": appendix_or_part,
+                    "paragraph_refs": extract_paragraph_refs(chunk) if source_type == "rule" else None,
                 }
             )
 
     if not all_chunks:
-        dim = 1536  # embedding dim for text-embedding-3-small
+        dim = 1536
         index = faiss.IndexFlatL2(dim)
         faiss.write_index(index, INDEX_FILE)
         with open(METADATA_FILE, "wb") as f:
@@ -299,14 +424,8 @@ def rebuild_index_from_drive(files: List[Dict]):
 
 def sync_drive_and_rebuild_index_if_needed():
     """
-    Check Drive for new/updated files; if changes are detected,
-    rebuild FAISS index and metadata from scratch.
-
-    ✅ Debounced: will not check Drive more than once per day globally.
-
-    Returns:
-        True  -> rebuilt now
-        False -> not rebuilt
+    Check ONLY the two target folders for new/updated files; rebuild if changed.
+    Debounced: will not check Drive more than once per day globally.
     """
     previous_state = load_previous_state()
 
@@ -322,11 +441,11 @@ def sync_drive_and_rebuild_index_if_needed():
             pass
     # ------------------------
 
-    files = list_drive_files()
-    changed, current_state = have_files_changed(files, previous_state)
+    tagged_files = list_drive_files_only_target_folders()
+    changed, current_state = have_files_changed(tagged_files, previous_state)
 
     if changed or not os.path.exists(INDEX_FILE) or not os.path.exists(METADATA_FILE):
-        rebuild_index_from_drive(files)
+        rebuild_index_from_drive(tagged_files)
 
         save_state(
             {
