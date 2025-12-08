@@ -283,25 +283,14 @@ def lookup_rule_tool(appendix_or_part, paragraph_ref=None, query=None):
 # 8. Model call with tool loop (HARDENED)
 # =========================
 def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filter_mode=None):
-    """
-    Checklist generation using Responses API + lookup_rule tool.
-
-    Fixes:
-    - Reads text from resp.output_text as well as resp.output items.
-    - Guarantees valid call_id for function_call_output.
-    - If call_id can't be recovered, falls back to a second full call
-      (instead of previous_response_id), which avoids BadRequest.
-    """
     rule_date = fetch_latest_rule_update_date()
     system_prompt = BASE_SYSTEM_PROMPT.replace("{RULE_UPDATE_DATE}", rule_date)
 
     enquiry_text = f"ROUTE:\n{route_text.strip()}\n\nFACTS:\n{facts_text.strip()}"
 
-    # Retrieve rules + precedents
     rule_chunks = search_index(enquiry_text, k=10, source_type="rule")
     precedent_chunks = search_index(enquiry_text, k=4, source_type="precedent")
 
-    # Grounding context
     grounding_context = "AUTHORITATIVE IMMIGRATION RULES EXTRACTS:\n"
     grounding_context += "\n\n".join(
         [
@@ -332,10 +321,7 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
         {
             "type": "function",
             "name": "lookup_rule",
-            "description": (
-                "Return exact Immigration Rules text for a given appendix/part and paragraph reference. "
-                "Use to support every requirement/discretion item."
-            ),
+            "description": "Return exact Immigration Rules text for a given appendix/part and paragraph reference.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -348,9 +334,9 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
         }
     ]
 
-    # ---- First call ----
+    # ---- First call (allow tools) ----
     resp = client.responses.create(
-        model="gpt-5.1",
+        model="gpt-5.1",  # or swap to gpt-4.1-mini if access uncertain
         input=[
             {"role": "system", "content": system_prompt},
             {"role": "system", "content": grounding_context},
@@ -361,118 +347,51 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
         temperature=0.2,
     )
 
-    def iter_items(output):
-        """Handle both dict-style and object-style SDK outputs."""
-        for it in output or []:
-            if hasattr(it, "type"):
-                yield it
-            elif isinstance(it, dict):
-                class _Tmp:
-                    pass
-                o = _Tmp()
-                for k, v in it.items():
-                    setattr(o, k, v)
-                yield o
-
-    # 1) text might already be here
-    output_text = getattr(resp, "output_text", "") or ""
+    # Collect any tool calls
     pending_tool_calls = []
-
-    # 2) also scan resp.output for text + tool calls
-    for item in iter_items(getattr(resp, "output", None)):
-        if item.type in ("tool_call", "function_call") and getattr(item, "name", None) == "lookup_rule":
+    for item in getattr(resp, "output", []) or []:
+        if getattr(item, "type", None) in ("tool_call", "function_call") and getattr(item, "name", None) == "lookup_rule":
             pending_tool_calls.append(item)
-        elif item.type == "output_text":
-            output_text += item.text
 
-    # ---- Tool resolve + follow-up ----
-    if pending_tool_calls:
-        tool_outputs = []
-        missing_call_ids = False
+    # If no tools called, return text directly
+    if not pending_tool_calls:
+        return (getattr(resp, "output_text", "") or "").strip()
 
-        for tc in pending_tool_calls:
-            raw_args = getattr(tc, "arguments", None) or "{}"
+    # ---- Resolve tools ourselves ----
+    resolved_rules = []
+    for tc in pending_tool_calls:
+        raw_args = getattr(tc, "arguments", None) or "{}"
+        try:
+            args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
+        except Exception:
+            args = {}
 
-            if isinstance(raw_args, str):
-                try:
-                    args = json.loads(raw_args)
-                except json.JSONDecodeError:
-                    args = {}
-            elif isinstance(raw_args, dict):
-                args = raw_args
-            else:
-                args = {}
+        tool_result = lookup_rule_tool(
+            appendix_or_part=args.get("appendix_or_part", ""),
+            paragraph_ref=args.get("paragraph_ref"),
+            query=args.get("query"),
+        )
+        resolved_rules.append(tool_result)
 
-            appendix_or_part = (args.get("appendix_or_part") or "").strip()
-            tool_result = lookup_rule_tool(
-                appendix_or_part=appendix_or_part,
-                paragraph_ref=args.get("paragraph_ref"),
-                query=args.get("query"),
-            )
+    # Add resolved rule text into context
+    resolved_context = grounding_context + "\n\nLOOKUP_RULE RESULTS (authoritative):\n"
+    for i, tr in enumerate(resolved_rules):
+        resolved_context += f"\n[LR{i+1}] {tr.get('appendix_or_part','')} {tr.get('paragraph_ref','')}\n"
+        for p in tr.get("passages", []):
+            resolved_context += f"- ({p.get('source','')} {p.get('paragraph_ref','')}) {p.get('text','')}\n"
 
-            # Try every reasonable id field
-            call_id = (
-                getattr(tc, "id", None)
-                or getattr(tc, "call_id", None)
-                or getattr(tc, "tool_call_id", None)
-            )
+    # ---- Second full call (NO tools, NO resume) ----
+    followup = client.responses.create(
+        model="gpt-5.1",
+        input=[
+            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": resolved_context},
+            {"role": "user", "content": user_instruction},
+        ],
+        temperature=0.2,
+    )
 
-            if not call_id:
-                missing_call_ids = True
-
-            tool_outputs.append({
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": json.dumps(tool_result),
-            })
-
-        if not missing_call_ids:
-            # Preferred: resume thread safely
-            followup = client.responses.create(
-                model="gpt-5.1",
-                previous_response_id=resp.id,
-                input=tool_outputs,
-                temperature=0.2,
-            )
-            output_text = getattr(followup, "output_text", "") or ""
-            if not output_text:
-                for item in iter_items(getattr(followup, "output", None)):
-                    if item.type == "output_text":
-                        output_text += item.text
-        else:
-            # Fallback: second full call (no previous_response_id)
-            # This avoids BadRequest when call_id is missing.
-            followup = client.responses.create(
-                model="gpt-5.1",
-                input=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "system", "content": grounding_context},
-                    {"role": "user", "content": user_instruction},
-                    {"role": "assistant", "content": "Tool results provided. Continue and produce final checklist."},
-                    *[
-                        {
-                            "role": "tool",
-                            "tool_call_id": (getattr(tc, "id", None) or getattr(tc, "call_id", None) or ""),
-                            "content": json.dumps(
-                                lookup_rule_tool(
-                                    appendix_or_part=(json.loads(getattr(tc, "arguments", "{}")) or {}).get("appendix_or_part", ""),
-                                    paragraph_ref=(json.loads(getattr(tc, "arguments", "{}")) or {}).get("paragraph_ref"),
-                                    query=(json.loads(getattr(tc, "arguments", "{}")) or {}).get("query"),
-                                )
-                            ),
-                        }
-                        for tc in pending_tool_calls
-                    ]
-                ],
-                temperature=0.2,
-            )
-            output_text = getattr(followup, "output_text", "") or ""
-            if not output_text:
-                for item in iter_items(getattr(followup, "output", None)):
-                    if item.type == "output_text":
-                        output_text += item.text
-
-    return (output_text or "").strip()
+    return (getattr(followup, "output_text", "") or "").strip()
 
 
 # =========================
