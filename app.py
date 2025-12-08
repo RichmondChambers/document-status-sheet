@@ -5,7 +5,7 @@ import numpy as np
 import re
 import json
 import requests
-import jwt  # from PyJWT
+import jwt  # PyJWT
 import streamlit.components.v1 as components
 from markdown_it import MarkdownIt
 from openai import OpenAI
@@ -52,6 +52,7 @@ def google_login():
             st.stop()
 
         try:
+            # NOTE: signature verification skipped for simplicity
             claims = jwt.decode(id_token, options={"verify_signature": False})
         except Exception:
             st.error("Could not decode ID token.")
@@ -86,12 +87,8 @@ def google_login():
 # =========================
 # 1. Keys + Auth (OpenAI client)
 # =========================
-api_key = st.secrets.get("OPENAI_API_KEY")
-if not api_key:
-    st.error("Missing OPENAI_API_KEY in Streamlit secrets.")
-    st.stop()
-
-client = OpenAI(api_key=api_key)
+# Make sure this key exists in .streamlit/secrets.toml as OPENAI_API_KEY="..."
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 user_email = google_login()
 
 
@@ -132,7 +129,7 @@ def extract_text_from_uploaded_file(uploaded_file):
     if name.endswith(".txt"):
         return uploaded_file.read().decode("utf-8", errors="ignore")
 
-    elif name.endswith(".pdf"):
+    if name.endswith(".pdf"):
         try:
             import PyPDF2
             reader = PyPDF2.PdfReader(uploaded_file)
@@ -143,7 +140,7 @@ def extract_text_from_uploaded_file(uploaded_file):
         except Exception:
             return ""
 
-    elif name.endswith(".docx"):
+    if name.endswith(".docx"):
         try:
             import docx
             doc = docx.Document(uploaded_file)
@@ -168,21 +165,16 @@ def get_embedding(text, model="text-embedding-3-small"):
 def search_index(query, k=8, source_type=None):
     """
     Search FAISS for top-k chunks.
-
-    If source_type is provided ("rule" or "precedent"),
-    filter results by metadata[i].get("type").
-
-    index_builder sets metadata items like:
-      {
-        "content": "...chunk text...",
-        "source": "Appendix FM.pdf",
-        "type": "rule",  # or "precedent"
-        "appendix_or_part": "Appendix FM",
-        "paragraph_refs": ["E-ECP.2.1.", "GEN.3.1."]  # optional list
-      }
+    source_type filters by metadata[i]["type"] in {"rule","precedent"}.
     """
+    if not metadata:
+        return []
+
     query_embedding = get_embedding(query)
-    distances, indices_ = index.search(np.array([query_embedding], dtype=np.float32), k * 3)
+    distances, indices_ = index.search(
+        np.array([query_embedding], dtype=np.float32),
+        k * 3
+    )
 
     results = []
     for i in indices_[0]:
@@ -193,7 +185,6 @@ def search_index(query, k=8, source_type=None):
             results.append(item)
         if len(results) >= k:
             break
-
     return results
 
 
@@ -203,7 +194,7 @@ def search_index(query, k=8, source_type=None):
 def fetch_latest_rule_update_date():
     """
     Light scrape of GOV.UK updates page.
-    If it fails, fallback to today's date.
+    If it fails, fallback to today's date (UTC).
     """
     try:
         r = requests.get("https://www.gov.uk/guidance/immigration-rules/updates", timeout=10)
@@ -213,7 +204,6 @@ def fetch_latest_rule_update_date():
         m = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", r.text)
         if not m:
             raise Exception("No date found")
-
         return m.group(1)
     except Exception:
         return str(np.datetime64("today"))
@@ -294,8 +284,7 @@ def lookup_rule_tool(appendix_or_part, paragraph_ref=None, query=None):
 # =========================
 def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filter_mode=None):
     """
-    Single-call checklist generation, with forced lookup_rule tool usage.
-    Two-step tool loop in line with Responses API patterns.
+    Checklist generation with a two-step tool loop (Responses API).
     """
     rule_date = fetch_latest_rule_update_date()
     system_prompt = BASE_SYSTEM_PROMPT.replace("{RULE_UPDATE_DATE}", rule_date)
@@ -306,7 +295,6 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
     rule_chunks = search_index(enquiry_text, k=10, source_type="rule")
     precedent_chunks = search_index(enquiry_text, k=4, source_type="precedent")
 
-    # Grounding context for the model
     grounding_context = "AUTHORITATIVE IMMIGRATION RULES EXTRACTS:\n"
     grounding_context += "\n\n".join(
         [
@@ -337,7 +325,10 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
         {
             "type": "function",
             "name": "lookup_rule",
-            "description": "Return exact Immigration Rules text for a given appendix/part and paragraph reference. Use to support every requirement/discretion item.",
+            "description": (
+                "Return exact Immigration Rules text for a given appendix/part and paragraph "
+                "reference. Use to support every requirement/discretion item."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -350,7 +341,7 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
         }
     ]
 
-    # First Responses call
+    # ---- First Responses call ----
     resp = client.responses.create(
         model="gpt-5.1",
         input=[
@@ -366,21 +357,21 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
     output_text = ""
     pending_tool_calls = []
 
-    # Parse output items (tolerant to SDK variants)
-    for item in getattr(resp, "output", []) or []:
-        if item.type in ("tool_call", "function_call") and getattr(item, "name", None) == "lookup_rule":
+    # Parse output items (SDK may return tool calls as output items)
+    for item in resp.output:
+        if item.type == "tool_call" and getattr(item, "name", None) == "lookup_rule":
             pending_tool_calls.append(item)
         elif item.type == "output_text":
             output_text += item.text
 
-    # If tools were called, resolve and follow up  ✅ (THIS WHOLE BLOCK IS INSIDE THE FUNCTION)
+    # ---- If the model called tools, resolve them and follow up ----
     if pending_tool_calls:
-        tool_messages = []
+        tool_outputs = []
 
         for tc in pending_tool_calls:
             raw_args = tc.arguments or "{}"
 
-            # tc.arguments may be JSON string or dict depending on SDK
+            # arguments sometimes arrive as a JSON string
             if isinstance(raw_args, str):
                 try:
                     args = json.loads(raw_args)
@@ -397,38 +388,26 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
                 query=args.get("query"),
             )
 
-            tool_messages.append(
+            # Responses API expects function_call_output items
+            tool_outputs.append(
                 {
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": json.dumps(tool_result),
+                    "type": "function_call_output",
+                    "call_id": tc.id,
+                    "output": json.dumps(tool_result),
                 }
             )
 
         followup = client.responses.create(
             model="gpt-5.1",
-            input=[
-                {"role": "system", "content": system_prompt},
-                {"role": "system", "content": grounding_context},
-                {"role": "user", "content": user_instruction},
-                {"role": "assistant",
-                 "content": "Tool results provided. Continue and produce final checklist."},
-                *tool_messages,
-            ],
+            previous_response_id=resp.id,
+            input=tool_outputs,
+            tools=tools,          # re-declare tools on follow-up
             temperature=0.2,
         )
 
-        # Prefer followup.output_text if present; fallback to concatenating items
-        if hasattr(followup, "output_text") and followup.output_text:
-            output_text = followup.output_text
-        else:
-            tmp = ""
-            for it in getattr(followup, "output", []) or []:
-                if it.type == "output_text":
-                    tmp += it.text
-            output_text = tmp or output_text
+        output_text = followup.output_text
 
-    return output_text  # ✅ return is inside function
+    return output_text
 
 
 # =========================
@@ -440,7 +419,8 @@ st.markdown(
 )
 
 st.markdown(
-    f"<p style='color: grey; text-align: center; font-size: 0.9rem;'>Immigration Rules index last rebuilt from Drive on: <b>{last_rebuilt}</b></p>",
+    f"<p style='color: grey; text-align: center; font-size: 0.9rem;'>"
+    f"Immigration Rules index last rebuilt from Drive on: <b>{last_rebuilt}</b></p>",
     unsafe_allow_html=True
 )
 
@@ -473,10 +453,7 @@ with st.form("checklist_form"):
     route = st.text_area(
         "Route",
         height=140,
-        placeholder=(
-            "Example:\n"
-            "Spouse visa extension under Appendix FM."
-        )
+        placeholder="Example:\nSpouse visa extension under Appendix FM."
     )
     facts = st.text_area(
         "Facts (include applicant nationality/location if relevant)",
@@ -491,80 +468,77 @@ with st.form("checklist_form"):
     submit = st.form_submit_button("Generate Status Sheet")
 
 
-if submit:
-    if not (route.strip() or facts.strip()):
-        st.warning("Please provide at least a route or some facts.")
-    else:
-        with st.spinner("Retrieving Rules, checking precedents, and generating status sheet..."):
-            extra_text = None
-            if uploaded_doc is not None:
-                extra_text = extract_text_from_uploaded_file(uploaded_doc)
+if submit and (route.strip() or facts.strip()):
+    with st.spinner("Retrieving Rules, checking precedents, and generating status sheet..."):
+        extra_text = None
+        if uploaded_doc is not None:
+            extra_text = extract_text_from_uploaded_file(uploaded_doc)
 
-            reply = generate_checklist(
-                route_text=route,
-                facts_text=facts,
-                extra_route_facts_text=extra_text,
-                filter_mode=filter_mode
-            )
+        reply = generate_checklist(
+            route_text=route,
+            facts_text=facts,
+            extra_route_facts_text=extra_text,
+            filter_mode=filter_mode
+        )
 
-            st.success("Status sheet generated.")
+        st.success("Status sheet generated.")
 
-            st.subheader("Status Sheet Output (copy into Google Sheets)")
-            st.text_area("Status Sheet", value=reply, height=650)
+        st.subheader("Status Sheet Output (copy into Google Sheets)")
+        st.text_area("Status Sheet", value=reply, height=650)
 
-            st.markdown(
-                """
-                ---  
-                **Professional Responsibility Statement**
+        st.markdown(
+            """
+            ---  
+            **Professional Responsibility Statement**
 
-                AI-generated content must not be relied upon without human review. Where such
-                content is used, the barrister is responsible for verifying and ensuring the accuracy
-                and legal soundness of that content. AI tools are used solely to support drafting and
-                research; they do not replace the barrister’s independent judgment, analysis, or duty
-                of care.
-                """,
-                unsafe_allow_html=False,
-            )
+            AI-generated content must not be relied upon without human review. Where such
+            content is used, the barrister is responsible for verifying and ensuring the accuracy
+            and legal soundness of that content. AI tools are used solely to support drafting and
+            research; they do not replace the barrister’s independent judgment, analysis, or duty
+            of care.
+            """,
+            unsafe_allow_html=False,
+        )
 
-            # Copy button
-            md = MarkdownIt()
-            html_reply = md.render(reply)
+        # Copy button
+        md = MarkdownIt()
+        html_reply = md.render(reply)
 
-            components.html(
-                f"""
-                <style>
-                .copy-button {{
-                    margin-top: 10px;
-                    padding: 8px 16px;
-                    background-color: #2e2e2e;
-                    color: white;
-                    border: none;
-                    border-radius: 4px;
-                    cursor: pointer;
-                }}
-                .copy-button:hover {{ background-color: #4a4a4a; }}
-                </style>
+        components.html(
+            f"""
+            <style>
+            .copy-button {{
+                margin-top: 10px;
+                padding: 8px 16px;
+                background-color: #2e2e2e;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                cursor: pointer;
+            }}
+            .copy-button:hover {{ background-color: #4a4a4a; }}
+            </style>
 
-                <button class="copy-button" onclick="copyToClipboard()">📋 Copy to Clipboard</button>
+            <button class="copy-button" onclick="copyToClipboard()">📋 Copy to Clipboard</button>
 
-                <script>
-                async function copyToClipboard() {{
-                    const htmlContent = `{html_reply.replace("`", "\\`")}`;
-                    const plainText = `{reply.replace("`", "\\`")}`;
+            <script>
+            async function copyToClipboard() {{
+                const htmlContent = `{html_reply.replace("`", "\\`")}`;
+                const plainText = `{reply.replace("`", "\\`")}`;
 
-                    const blobHtml = new Blob([htmlContent], {{ type: 'text/html' }});
-                    const blobText = new Blob([plainText], {{ type: 'text/plain' }});
+                const blobHtml = new Blob([htmlContent], {{ type: 'text/html' }});
+                const blobText = new Blob([plainText], {{ type: 'text/plain' }});
 
-                    const clipboardItem = new ClipboardItem({{
-                        'text/html': blobHtml,
-                        'text/plain': blobText
-                    }});
+                const clipboardItem = new ClipboardItem({{
+                    'text/html': blobHtml,
+                    'text/plain': blobText
+                }});
 
-                    await navigator.clipboard.write([clipboardItem]);
-                    alert("Copied! Paste into Gmail/Docs/Sheets.");
-                }}
-                </script>
-                """,
-                height=110,
-                scrolling=False
-            )
+                await navigator.clipboard.write([clipboardItem]);
+                alert("Copied! Paste into Gmail/Docs/Sheets.");
+            }}
+            </script>
+            """,
+            height=110,
+            scrolling=False
+        )
