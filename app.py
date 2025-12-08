@@ -390,9 +390,9 @@ tool_result = lookup_rule_tool(
     query=args.get("query"),
 )
 
-            tool_messages.append(
-                {"role": "tool", "tool_call_id": tc.id, "content": json.dumps(tool_result)}
-            )
+tool_messages.append(
+    {"role": "tool", "tool_call_id": tc.id, "content": json.dumps(tool_result)}
+)
 
         followup = client.responses.create(
             model="gpt-5.1",
