@@ -86,7 +86,12 @@ def google_login():
 # =========================
 # 1. Keys + Auth (OpenAI client)
 # =========================
-client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+api_key = st.secrets.get("OPENAI_API_KEY")
+if not api_key:
+    st.error("Missing OPENAI_API_KEY in Streamlit secrets.")
+    st.stop()
+
+client = OpenAI(api_key=api_key)
 user_email = google_login()
 
 
@@ -183,12 +188,12 @@ def search_index(query, k=8, source_type=None):
     for i in indices_[0]:
         if i < len(metadata):
             item = metadata[i]
-            if source_type:
-                if item.get("type") != source_type:
-                    continue
+            if source_type and item.get("type") != source_type:
+                continue
             results.append(item)
         if len(results) >= k:
             break
+
     return results
 
 
@@ -205,7 +210,6 @@ def fetch_latest_rule_update_date():
         if r.status_code != 200:
             raise Exception("Bad status")
 
-        # crude but reliable: look for first YYYY-MM-DD in page header area
         m = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", r.text)
         if not m:
             raise Exception("No date found")
@@ -315,8 +319,10 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
 
     grounding_context += "\n\nINTERNAL PRECEDENT EXTRACTS (style only, not authority):\n"
     grounding_context += "\n\n".join(
-        [f"[P{i+1}] ({pc.get('source','')})\n{pc.get('content','')}"
-         for i, pc in enumerate(precedent_chunks)]
+        [
+            f"[P{i+1}] ({pc.get('source','')})\n{pc.get('content','')}"
+            for i, pc in enumerate(precedent_chunks)
+        ]
     )
 
     if extra_route_facts_text and extra_route_facts_text.strip():
@@ -361,56 +367,69 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
     pending_tool_calls = []
 
     # Parse output items (tolerant to SDK variants)
-    for item in resp.output:
+    for item in getattr(resp, "output", []) or []:
         if item.type in ("tool_call", "function_call") and getattr(item, "name", None) == "lookup_rule":
             pending_tool_calls.append(item)
         elif item.type == "output_text":
             output_text += item.text
 
-# If tools were called, resolve and follow up
-if pending_tool_calls:
-    tool_messages = []
+    # If tools were called, resolve and follow up  ✅ (THIS WHOLE BLOCK IS INSIDE THE FUNCTION)
+    if pending_tool_calls:
+        tool_messages = []
 
-    for tc in pending_tool_calls:
-        raw_args = tc.arguments or "{}"
+        for tc in pending_tool_calls:
+            raw_args = tc.arguments or "{}"
 
-        if isinstance(raw_args, str):
-            try:
-                args = json.loads(raw_args)
-            except json.JSONDecodeError:
+            # tc.arguments may be JSON string or dict depending on SDK
+            if isinstance(raw_args, str):
+                try:
+                    args = json.loads(raw_args)
+                except json.JSONDecodeError:
+                    args = {}
+            elif isinstance(raw_args, dict):
+                args = raw_args
+            else:
                 args = {}
-        elif isinstance(raw_args, dict):
-            args = raw_args
-        else:
-            args = {}
 
-        tool_result = lookup_rule_tool(
-            appendix_or_part=args.get("appendix_or_part", ""),
-            paragraph_ref=args.get("paragraph_ref"),
-            query=args.get("query"),
+            tool_result = lookup_rule_tool(
+                appendix_or_part=args.get("appendix_or_part", ""),
+                paragraph_ref=args.get("paragraph_ref"),
+                query=args.get("query"),
+            )
+
+            tool_messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": json.dumps(tool_result),
+                }
+            )
+
+        followup = client.responses.create(
+            model="gpt-5.1",
+            input=[
+                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": grounding_context},
+                {"role": "user", "content": user_instruction},
+                {"role": "assistant",
+                 "content": "Tool results provided. Continue and produce final checklist."},
+                *tool_messages,
+            ],
+            temperature=0.2,
         )
 
-        tool_messages.append({
-            "role": "tool",
-            "tool_call_id": tc.id,
-            "content": json.dumps(tool_result)
-        })
+        # Prefer followup.output_text if present; fallback to concatenating items
+        if hasattr(followup, "output_text") and followup.output_text:
+            output_text = followup.output_text
+        else:
+            tmp = ""
+            for it in getattr(followup, "output", []) or []:
+                if it.type == "output_text":
+                    tmp += it.text
+            output_text = tmp or output_text
 
-    # ✅ followup must be OUTSIDE the for-loop, but INSIDE the if-block
-    followup = client.responses.create(
-        model="gpt-5.1",
-        input=[
-            {"role": "system", "content": system_prompt},
-            {"role": "system", "content": grounding_context},
-            {"role": "user", "content": user_instruction},
-            {"role": "assistant", "content": "Tool results provided. Continue and produce final checklist."},
-            *tool_messages
-        ],
-        temperature=0.2,
-    )
-    output_text = followup.output_text
+    return output_text  # ✅ return is inside function
 
-return output_text
 
 # =========================
 # 9. Streamlit UI
@@ -472,77 +491,80 @@ with st.form("checklist_form"):
     submit = st.form_submit_button("Generate Status Sheet")
 
 
-if submit and (route.strip() or facts.strip()):
-    with st.spinner("Retrieving Rules, checking precedents, and generating status sheet..."):
-        extra_text = None
-        if uploaded_doc is not None:
-            extra_text = extract_text_from_uploaded_file(uploaded_doc)
+if submit:
+    if not (route.strip() or facts.strip()):
+        st.warning("Please provide at least a route or some facts.")
+    else:
+        with st.spinner("Retrieving Rules, checking precedents, and generating status sheet..."):
+            extra_text = None
+            if uploaded_doc is not None:
+                extra_text = extract_text_from_uploaded_file(uploaded_doc)
 
-        reply = generate_checklist(
-            route_text=route,
-            facts_text=facts,
-            extra_route_facts_text=extra_text,
-            filter_mode=filter_mode
-        )
+            reply = generate_checklist(
+                route_text=route,
+                facts_text=facts,
+                extra_route_facts_text=extra_text,
+                filter_mode=filter_mode
+            )
 
-        st.success("Status sheet generated.")
+            st.success("Status sheet generated.")
 
-        st.subheader("Status Sheet Output (copy into Google Sheets)")
-        st.text_area("Status Sheet", value=reply, height=650)
+            st.subheader("Status Sheet Output (copy into Google Sheets)")
+            st.text_area("Status Sheet", value=reply, height=650)
 
-        st.markdown(
-            """
-            ---  
-            **Professional Responsibility Statement**
+            st.markdown(
+                """
+                ---  
+                **Professional Responsibility Statement**
 
-            AI-generated content must not be relied upon without human review. Where such
-            content is used, the barrister is responsible for verifying and ensuring the accuracy
-            and legal soundness of that content. AI tools are used solely to support drafting and
-            research; they do not replace the barrister’s independent judgment, analysis, or duty
-            of care.
-            """,
-            unsafe_allow_html=False,
-        )
+                AI-generated content must not be relied upon without human review. Where such
+                content is used, the barrister is responsible for verifying and ensuring the accuracy
+                and legal soundness of that content. AI tools are used solely to support drafting and
+                research; they do not replace the barrister’s independent judgment, analysis, or duty
+                of care.
+                """,
+                unsafe_allow_html=False,
+            )
 
-        # Copy button
-        md = MarkdownIt()
-        html_reply = md.render(reply)
+            # Copy button
+            md = MarkdownIt()
+            html_reply = md.render(reply)
 
-        components.html(
-            f"""
-            <style>
-            .copy-button {{
-                margin-top: 10px;
-                padding: 8px 16px;
-                background-color: #2e2e2e;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                cursor: pointer;
-            }}
-            .copy-button:hover {{ background-color: #4a4a4a; }}
-            </style>
+            components.html(
+                f"""
+                <style>
+                .copy-button {{
+                    margin-top: 10px;
+                    padding: 8px 16px;
+                    background-color: #2e2e2e;
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    cursor: pointer;
+                }}
+                .copy-button:hover {{ background-color: #4a4a4a; }}
+                </style>
 
-            <button class="copy-button" onclick="copyToClipboard()">📋 Copy to Clipboard</button>
+                <button class="copy-button" onclick="copyToClipboard()">📋 Copy to Clipboard</button>
 
-            <script>
-            async function copyToClipboard() {{
-                const htmlContent = `{html_reply.replace("`", "\\`")}`;
-                const plainText = `{reply.replace("`", "\\`")}`;
+                <script>
+                async function copyToClipboard() {{
+                    const htmlContent = `{html_reply.replace("`", "\\`")}`;
+                    const plainText = `{reply.replace("`", "\\`")}`;
 
-                const blobHtml = new Blob([htmlContent], {{ type: 'text/html' }});
-                const blobText = new Blob([plainText], {{ type: 'text/plain' }});
+                    const blobHtml = new Blob([htmlContent], {{ type: 'text/html' }});
+                    const blobText = new Blob([plainText], {{ type: 'text/plain' }});
 
-                const clipboardItem = new ClipboardItem({{
-                    'text/html': blobHtml,
-                    'text/plain': blobText
-                }});
+                    const clipboardItem = new ClipboardItem({{
+                        'text/html': blobHtml,
+                        'text/plain': blobText
+                    }});
 
-                await navigator.clipboard.write([clipboardItem]);
-                alert("Copied! Paste into Gmail/Docs/Sheets.");
-            }}
-            </script>
-            """,
-            height=110,
-            scrolling=False
-        )
+                    await navigator.clipboard.write([clipboardItem]);
+                    alert("Copied! Paste into Gmail/Docs/Sheets.");
+                }}
+                </script>
+                """,
+                height=110,
+                scrolling=False
+            )
