@@ -280,13 +280,13 @@ def lookup_rule_tool(appendix_or_part, paragraph_ref=None, query=None):
 
 
 # =========================
-# 8. Model call with tool loop (FIXED)
+# 8. Model call with tool loop (HARDENED)
 # =========================
 def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filter_mode=None):
     """
     Checklist generation using Responses API + lookup_rule tool.
     Correctly resumes state after tool calls via previous_response_id.
-    Robust to SDK output shape differences.
+    Robust to SDK output shape differences and tool-call id variants.
     """
     rule_date = fetch_latest_rule_update_date()
     system_prompt = BASE_SYSTEM_PROMPT.replace("{RULE_UPDATE_DATE}", rule_date)
@@ -360,12 +360,11 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
     def iter_items(output):
         """Handle both dict-style and object-style SDK outputs."""
         for it in output or []:
-            # object-style
             if hasattr(it, "type"):
                 yield it
-            # dict-style
             elif isinstance(it, dict):
-                class _Tmp: pass
+                class _Tmp:
+                    pass
                 o = _Tmp()
                 for k, v in it.items():
                     setattr(o, k, v)
@@ -380,7 +379,7 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
         elif item.type == "output_text":
             output_text += item.text
 
-        # If tools were called, resolve and follow up
+    # ---- Tool resolve + follow-up ----
     if pending_tool_calls:
         tool_outputs = []
 
@@ -397,20 +396,27 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
             else:
                 args = {}
 
-            tool_result = lookup_rule_tool(
-                appendix_or_part=args.get("appendix_or_part", ""),
-                paragraph_ref=args.get("paragraph_ref"),
-                query=args.get("query"),
-            )
+            appendix_or_part = args.get("appendix_or_part", "").strip()
+            if not appendix_or_part:
+                tool_result = {
+                    "error": "appendix_or_part missing from tool call",
+                    "arguments": args
+                }
+            else:
+                tool_result = lookup_rule_tool(
+                    appendix_or_part=appendix_or_part,
+                    paragraph_ref=args.get("paragraph_ref"),
+                    query=args.get("query"),
+                )
 
-            # ✅ Correct Responses-API tool output item
+            call_id = getattr(tc, "id", None) or getattr(tc, "call_id", None)
+
             tool_outputs.append({
                 "type": "function_call_output",
-                "call_id": tc.id,
+                "call_id": call_id,
                 "output": json.dumps(tool_result),
             })
 
-        # ✅ Resume the same response thread
         followup = client.responses.create(
             model="gpt-5.1",
             previous_response_id=resp.id,
@@ -418,11 +424,10 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
             temperature=0.2,
         )
 
-        # Safest way to read text across SDK variants
         output_text = getattr(followup, "output_text", "") or ""
         if not output_text:
-            for item in followup.output or []:
-                if getattr(item, "type", None) == "output_text":
+            for item in iter_items(getattr(followup, "output", None)):
+                if item.type == "output_text":
                     output_text += item.text
 
     return output_text.strip()
