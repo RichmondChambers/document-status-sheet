@@ -119,7 +119,7 @@ index, metadata, last_rebuilt = load_index_and_metadata()
 
 
 # =========================
-# 3. File extraction (unchanged)
+# 3. File extraction
 # =========================
 def extract_text_from_uploaded_file(uploaded_file):
     name = uploaded_file.name.lower()
@@ -250,9 +250,6 @@ Link Appendix references to GOV.UK unless user asks otherwise.
 Country-specificity:
 - If nationality or location is provided, add relevant country-specific evidence notes (TB test, approved English tests, apostille/translation norms), citing GOV.UK guidance.
 
-Bundle review:
-- If user provides/uploads a draft bundle, compare it against rule-based requirements; flag missing mandatory docs and insufficiencies, each with rule citation.
-
 Legal Authority Summary:
 - If any rules cited, end with “Legal Authority Summary” listing each cited rule with GOV.UK hyperlink + one-line scope.
 """
@@ -291,13 +288,15 @@ def lookup_rule_tool(appendix_or_part, paragraph_ref=None, query=None):
 # =========================
 # 8. Model call with tool loop
 # =========================
-def generate_checklist(enquiry_text, extra_bundle_text=None, filter_mode=None):
+def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filter_mode=None):
     """
     Single-call checklist generation, with forced lookup_rule tool usage.
     Two-step tool loop in line with Responses API patterns.
     """
     rule_date = fetch_latest_rule_update_date()
     system_prompt = BASE_SYSTEM_PROMPT.replace("{RULE_UPDATE_DATE}", rule_date)
+
+    enquiry_text = f"ROUTE:\n{route_text.strip()}\n\nFACTS:\n{facts_text.strip()}"
 
     # Retrieve rules + precedents
     rule_chunks = search_index(enquiry_text, k=10, source_type="rule")
@@ -320,9 +319,9 @@ def generate_checklist(enquiry_text, extra_bundle_text=None, filter_mode=None):
          for i, pc in enumerate(precedent_chunks)]
     )
 
-    if extra_bundle_text and extra_bundle_text.strip():
-        grounding_context += "\n\nUPLOADED DRAFT BUNDLE / USER DOCUMENT:\n"
-        grounding_context += extra_bundle_text.strip()
+    if extra_route_facts_text and extra_route_facts_text.strip():
+        grounding_context += "\n\nUPLOADED ROUTE/FACTS DOCUMENT:\n"
+        grounding_context += extra_route_facts_text.strip()
 
     user_instruction = enquiry_text
     if filter_mode and filter_mode != "Full checklist":
@@ -402,7 +401,7 @@ def generate_checklist(enquiry_text, extra_bundle_text=None, filter_mode=None):
 # 9. Streamlit UI
 # =========================
 st.markdown(
-    "<h1 style='text-align: center; font-size: 2.6rem;'>Document Checklist Generator</h1>",
+    "<h1 style='text-align: center; font-size: 2.6rem;'>Document Status Sheet Generator</h1>",
     unsafe_allow_html=True
 )
 
@@ -412,14 +411,15 @@ st.markdown(
 )
 
 st.markdown(
-    "Provide the route + facts. The app will generate a rule-based document checklist "
+    "Provide the immigration route and the case facts in separate fields. "
+    "The app will generate a rule-based document status sheet "
     "in 3 columns suitable for Google Sheets, with exact rule quotations."
 )
 
-uploaded_bundle = st.file_uploader(
-    "Optional: upload a draft bundle or indexed list to review against the Rules.",
+uploaded_doc = st.file_uploader(
+    "Optional: upload a document describing the route and facts.",
     type=["pdf", "txt", "docx"],
-    help="E.g., draft document index, refusal letter, or current bundle."
+    help="E.g., case summary, client instructions, or notes setting out the route and facts."
 )
 
 filter_mode = st.selectbox(
@@ -436,36 +436,44 @@ filter_mode = st.selectbox(
 )
 
 with st.form("checklist_form"):
-    enquiry = st.text_area(
-        "Route + Facts (include applicant nationality/location if relevant)",
+    route = st.text_area(
+        "Route",
+        height=140,
+        placeholder=(
+            "Example:\n"
+            "Spouse visa extension under Appendix FM."
+        )
+    )
+    facts = st.text_area(
+        "Facts (include applicant nationality/location if relevant)",
         height=260,
         placeholder=(
             "Example:\n"
-            "Spouse visa extension (Appendix FM). Sponsor is British citizen. "
-            "Applicant is Swiss, applying from London. Relationship married 3 years, "
-            "cohabiting. Salaried income £35,000. One child British. "
-            "Need a rule-based checklist."
+            "Sponsor is British citizen. Applicant is Swiss, applying from London. "
+            "Relationship married 3 years, cohabiting. Salaried income £35,000. "
+            "One child British. Need a rule-based document status sheet."
         )
     )
-    submit = st.form_submit_button("Generate Checklist")
+    submit = st.form_submit_button("Generate Status Sheet")
 
 
-if submit and enquiry:
-    with st.spinner("Retrieving Rules, checking precedents, and generating checklist..."):
+if submit and (route.strip() or facts.strip()):
+    with st.spinner("Retrieving Rules, checking precedents, and generating status sheet..."):
         extra_text = None
-        if uploaded_bundle is not None:
-            extra_text = extract_text_from_uploaded_file(uploaded_bundle)
+        if uploaded_doc is not None:
+            extra_text = extract_text_from_uploaded_file(uploaded_doc)
 
         reply = generate_checklist(
-            enquiry_text=enquiry,
-            extra_bundle_text=extra_text,
+            route_text=route,
+            facts_text=facts,
+            extra_route_facts_text=extra_text,
             filter_mode=filter_mode
         )
 
-        st.success("Checklist generated.")
+        st.success("Status sheet generated.")
 
-        st.subheader("Checklist Output (copy into Google Sheets)")
-        st.text_area("Checklist", value=reply, height=650)
+        st.subheader("Status Sheet Output (copy into Google Sheets)")
+        st.text_area("Status Sheet", value=reply, height=650)
 
         st.markdown(
             """
