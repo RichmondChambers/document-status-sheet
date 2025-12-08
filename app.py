@@ -1,5 +1,4 @@
 import streamlit as st
-import openai
 import faiss
 import pickle
 import numpy as np
@@ -9,11 +8,13 @@ import requests
 import jwt  # from PyJWT
 import streamlit.components.v1 as components
 from markdown_it import MarkdownIt
+from openai import OpenAI
+
 from index_builder import sync_drive_and_rebuild_index_if_needed, INDEX_FILE, METADATA_FILE
 
 
 # =========================
-# 0. Google SSO (unchanged)
+# 0. Google SSO
 # =========================
 def google_login():
     """
@@ -36,6 +37,7 @@ def google_login():
                 "redirect_uri": st.secrets["GOOGLE_REDIRECT_URI"],
                 "grant_type": "authorization_code",
             },
+            timeout=15
         )
 
         if token_response.status_code != 200:
@@ -82,9 +84,9 @@ def google_login():
 
 
 # =========================
-# 1. Keys + Auth
+# 1. Keys + Auth (OpenAI client)
 # =========================
-openai.api_key = st.secrets["OPENAI_API_KEY"]
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 user_email = google_login()
 
 
@@ -154,7 +156,7 @@ def extract_text_from_uploaded_file(uploaded_file):
 # 4. Embeddings + retrieval
 # =========================
 def get_embedding(text, model="text-embedding-3-small"):
-    result = openai.embeddings.create(input=[text], model=model)
+    result = client.embeddings.create(input=[text], model=model)
     return result.data[0].embedding
 
 
@@ -165,26 +167,24 @@ def search_index(query, k=8, source_type=None):
     If source_type is provided ("rule" or "precedent"),
     filter results by metadata[i].get("type").
 
-    IMPORTANT: Your index_builder should set metadata items like:
+    index_builder sets metadata items like:
       {
         "content": "...chunk text...",
         "source": "Appendix FM.pdf",
         "type": "rule",  # or "precedent"
         "appendix_or_part": "Appendix FM",
-        "paragraph_ref": "E-ECP.2.1."  # optional if you can extract it
+        "paragraph_refs": ["E-ECP.2.1.", "GEN.3.1."]  # optional list
       }
     """
     query_embedding = get_embedding(query)
-    distances, indices_ = index.search(np.array([query_embedding], dtype=np.float32), k*3)
+    distances, indices_ = index.search(np.array([query_embedding], dtype=np.float32), k * 3)
 
     results = []
     for i in indices_[0]:
         if i < len(metadata):
             item = metadata[i]
             if source_type:
-                # safe fallback if old metadata doesn't have type
-                t = item.get("type")
-                if t != source_type:
+                if item.get("type") != source_type:
                     continue
             results.append(item)
         if len(results) >= k:
@@ -216,7 +216,7 @@ def fetch_latest_rule_update_date():
 
 
 # =========================
-# 6. System prompt for your Custom GPT
+# 6. System prompt
 # =========================
 BASE_SYSTEM_PROMPT = """
 You are a UK immigration lawyer specialising in document-checklist guidance for visa/immigration applications under the UK's Immigration Rules.
@@ -269,17 +269,22 @@ def lookup_rule_tool(appendix_or_part, paragraph_ref=None, query=None):
     q = " ".join([s for s in [appendix_or_part, paragraph_ref, query] if s])
     hits = search_index(q, k=3, source_type="rule")
 
+    inferred_ref = None
+    if hits:
+        refs = hits[0].get("paragraph_refs") or []
+        inferred_ref = refs[0] if refs else None
+
     return {
         "appendix_or_part": appendix_or_part,
-        "paragraph_ref": paragraph_ref or hits[0].get("paragraph_ref") if hits else None,
+        "paragraph_ref": paragraph_ref or inferred_ref,
         "passages": [
             {
                 "text": h.get("content", ""),
                 "source": h.get("source", ""),
-                "paragraph_ref": h.get("paragraph_ref", "")
+                "paragraph_ref": (h.get("paragraph_refs") or [""])[0],
             }
             for h in hits
-        ]
+        ],
     }
 
 
@@ -289,6 +294,7 @@ def lookup_rule_tool(appendix_or_part, paragraph_ref=None, query=None):
 def generate_checklist(enquiry_text, extra_bundle_text=None, filter_mode=None):
     """
     Single-call checklist generation, with forced lookup_rule tool usage.
+    Two-step tool loop in line with Responses API patterns.
     """
     rule_date = fetch_latest_rule_update_date()
     system_prompt = BASE_SYSTEM_PROMPT.replace("{RULE_UPDATE_DATE}", rule_date)
@@ -297,10 +303,15 @@ def generate_checklist(enquiry_text, extra_bundle_text=None, filter_mode=None):
     rule_chunks = search_index(enquiry_text, k=10, source_type="rule")
     precedent_chunks = search_index(enquiry_text, k=4, source_type="precedent")
 
+    # Grounding context for the model
     grounding_context = "AUTHORITATIVE IMMIGRATION RULES EXTRACTS:\n"
     grounding_context += "\n\n".join(
-        [f"[R{i+1}] ({rc.get('appendix_or_part','')}{' '+rc.get('paragraph_ref','') if rc.get('paragraph_ref') else ''} — {rc.get('source','')})\n{rc.get('content','')}"
-         for i, rc in enumerate(rule_chunks)]
+        [
+            f"[R{i+1}] ({(rc.get('appendix_or_part') or '')}"
+            f"{' ' + (rc.get('paragraph_refs') or [''])[0] if rc.get('paragraph_refs') else ''}"
+            f" — {rc.get('source','')})\n{rc.get('content','')}"
+            for i, rc in enumerate(rule_chunks)
+        ]
     )
 
     grounding_context += "\n\nINTERNAL PRECEDENT EXTRACTS (style only, not authority):\n"
@@ -309,55 +320,55 @@ def generate_checklist(enquiry_text, extra_bundle_text=None, filter_mode=None):
          for i, pc in enumerate(precedent_chunks)]
     )
 
-    # Add uploaded bundle if present
     if extra_bundle_text and extra_bundle_text.strip():
         grounding_context += "\n\nUPLOADED DRAFT BUNDLE / USER DOCUMENT:\n"
         grounding_context += extra_bundle_text.strip()
 
-    # If filter requested
     user_instruction = enquiry_text
     if filter_mode and filter_mode != "Full checklist":
         user_instruction += f"\n\nFILTER REQUEST: {filter_mode}"
 
-    # Call Responses API (Python SDK style)
-    resp = openai.responses.create(
+    tools = [
+        {
+            "type": "function",
+            "name": "lookup_rule",
+            "description": "Return exact Immigration Rules text for a given appendix/part and paragraph reference. Use to support every requirement/discretion item.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "appendix_or_part": {"type": "string"},
+                    "paragraph_ref": {"type": "string"},
+                    "query": {"type": "string"},
+                },
+                "required": ["appendix_or_part"],
+            },
+        }
+    ]
+
+    # First Responses call
+    resp = client.responses.create(
         model="gpt-5.1",
         input=[
             {"role": "system", "content": system_prompt},
             {"role": "system", "content": grounding_context},
             {"role": "user", "content": user_instruction},
         ],
-        tools=[
-            {
-                "type": "function",
-                "name": "lookup_rule",
-                "description": "Return exact Immigration Rules text for a given appendix/part and paragraph reference. Use to support every requirement/discretion item.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "appendix_or_part": {"type": "string"},
-                        "paragraph_ref": {"type": "string"},
-                        "query": {"type": "string"},
-                    },
-                    "required": ["appendix_or_part"],
-                },
-            }
-        ],
+        tools=tools,
         tool_choice="auto",
         temperature=0.2,
     )
 
-    # Tool handling loop
     output_text = ""
     pending_tool_calls = []
 
+    # Parse output items (tolerant to SDK variants)
     for item in resp.output:
-        if item.type == "tool_call" and item.name == "lookup_rule":
+        if item.type in ("tool_call", "function_call") and getattr(item, "name", None) == "lookup_rule":
             pending_tool_calls.append(item)
         elif item.type == "output_text":
             output_text += item.text
 
-    # If tools were called, resolve them and do a follow-up call
+    # If tools were called, resolve and follow up
     if pending_tool_calls:
         tool_messages = []
         for tc in pending_tool_calls:
@@ -371,15 +382,14 @@ def generate_checklist(enquiry_text, extra_bundle_text=None, filter_mode=None):
                 {"role": "tool", "tool_call_id": tc.id, "content": json.dumps(tool_result)}
             )
 
-        followup = openai.responses.create(
+        followup = client.responses.create(
             model="gpt-5.1",
             input=[
                 {"role": "system", "content": system_prompt},
                 {"role": "system", "content": grounding_context},
                 {"role": "user", "content": user_instruction},
-                # tell model we're giving tool results
                 {"role": "assistant", "content": "Tool results provided. Continue and produce final checklist."},
-                *tool_messages
+                *tool_messages,
             ],
             temperature=0.2,
         )
@@ -471,7 +481,7 @@ if submit and enquiry:
             unsafe_allow_html=False,
         )
 
-        # Copy button (same as before)
+        # Copy button
         md = MarkdownIt()
         html_reply = md.render(reply)
 
