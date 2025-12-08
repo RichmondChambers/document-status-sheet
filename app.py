@@ -280,11 +280,13 @@ def lookup_rule_tool(appendix_or_part, paragraph_ref=None, query=None):
 
 
 # =========================
-# 8. Model call with tool loop
+# 8. Model call with tool loop (FIXED)
 # =========================
 def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filter_mode=None):
     """
-    Checklist generation with a two-step tool loop (Responses API).
+    Checklist generation using Responses API + lookup_rule tool.
+    Correctly resumes state after tool calls via previous_response_id.
+    Robust to SDK output shape differences.
     """
     rule_date = fetch_latest_rule_update_date()
     system_prompt = BASE_SYSTEM_PROMPT.replace("{RULE_UPDATE_DATE}", rule_date)
@@ -295,6 +297,7 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
     rule_chunks = search_index(enquiry_text, k=10, source_type="rule")
     precedent_chunks = search_index(enquiry_text, k=4, source_type="precedent")
 
+    # Grounding context
     grounding_context = "AUTHORITATIVE IMMIGRATION RULES EXTRACTS:\n"
     grounding_context += "\n\n".join(
         [
@@ -326,8 +329,8 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
             "type": "function",
             "name": "lookup_rule",
             "description": (
-                "Return exact Immigration Rules text for a given appendix/part and paragraph "
-                "reference. Use to support every requirement/discretion item."
+                "Return exact Immigration Rules text for a given appendix/part and paragraph reference. "
+                "Use to support every requirement/discretion item."
             ),
             "parameters": {
                 "type": "object",
@@ -341,7 +344,7 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
         }
     ]
 
-    # ---- First Responses call ----
+    # ---- First call ----
     resp = client.responses.create(
         model="gpt-5.1",
         input=[
@@ -354,24 +357,36 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
         temperature=0.2,
     )
 
+    def iter_items(output):
+        """Handle both dict-style and object-style SDK outputs."""
+        for it in output or []:
+            # object-style
+            if hasattr(it, "type"):
+                yield it
+            # dict-style
+            elif isinstance(it, dict):
+                class _Tmp: pass
+                o = _Tmp()
+                for k, v in it.items():
+                    setattr(o, k, v)
+                yield o
+
     output_text = ""
     pending_tool_calls = []
 
-    # Parse output items (SDK may return tool calls as output items)
-    for item in resp.output:
-        if item.type == "tool_call" and getattr(item, "name", None) == "lookup_rule":
+    for item in iter_items(resp.output):
+        if item.type in ("tool_call", "function_call") and getattr(item, "name", None) == "lookup_rule":
             pending_tool_calls.append(item)
         elif item.type == "output_text":
             output_text += item.text
 
-    # ---- If the model called tools, resolve them and follow up ----
+    # ---- If tools were called, resolve and follow up correctly ----
     if pending_tool_calls:
-        tool_outputs = []
+        tool_messages = []
 
         for tc in pending_tool_calls:
-            raw_args = tc.arguments or "{}"
+            raw_args = getattr(tc, "arguments", None) or "{}"
 
-            # arguments sometimes arrive as a JSON string
             if isinstance(raw_args, str):
                 try:
                     args = json.loads(raw_args)
@@ -388,26 +403,30 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
                 query=args.get("query"),
             )
 
-            # Responses API expects function_call_output items
-            tool_outputs.append(
-                {
-                    "type": "function_call_output",
-                    "call_id": tc.id,
-                    "output": json.dumps(tool_result),
-                }
-            )
+            tool_messages.append({
+                "type": "function_call_output",
+                "call_id": tc.id,
+                "output": json.dumps(tool_result),
+            })
 
+        # ✅ This is the key fix: resume with previous_response_id
         followup = client.responses.create(
             model="gpt-5.1",
             previous_response_id=resp.id,
-            input=tool_outputs,
-            tools=tools,          # re-declare tools on follow-up
+            input=tool_messages,
             temperature=0.2,
         )
 
-        output_text = followup.output_text
+        # First try output_text convenience attribute
+        output_text = getattr(followup, "output_text", "") or ""
 
-    return output_text
+        # Fallback: assemble from output items
+        if not output_text:
+            for item in iter_items(followup.output):
+                if item.type == "output_text":
+                    output_text += item.text
+
+    return output_text.strip()
 
 
 # =========================
