@@ -371,12 +371,25 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
     if pending_tool_calls:
         tool_messages = []
         for tc in pending_tool_calls:
-            args = tc.arguments or {}
-            tool_result = lookup_rule_tool(
-                appendix_or_part=args.get("appendix_or_part", ""),
-                paragraph_ref=args.get("paragraph_ref"),
-                query=args.get("query"),
-            )
+            raw_args = tc.arguments or "{}"
+
+# tc.arguments may be a dict OR a JSON string depending on SDK version
+if isinstance(raw_args, str):
+    try:
+        args = json.loads(raw_args)
+    except json.JSONDecodeError:
+        args = {}
+elif isinstance(raw_args, dict):
+    args = raw_args
+else:
+    args = {}
+
+tool_result = lookup_rule_tool(
+    appendix_or_part=args.get("appendix_or_part", ""),
+    paragraph_ref=args.get("paragraph_ref"),
+    query=args.get("query"),
+)
+
             tool_messages.append(
                 {"role": "tool", "tool_call_id": tc.id, "content": json.dumps(tool_result)}
             )
