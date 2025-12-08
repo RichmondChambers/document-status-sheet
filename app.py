@@ -394,18 +394,18 @@ tool_messages.append(
     {"role": "tool", "tool_call_id": tc.id, "content": json.dumps(tool_result)}
 )
 
-        followup = client.responses.create(
-            model="gpt-5.1",
-            input=[
-                {"role": "system", "content": system_prompt},
-                {"role": "system", "content": grounding_context},
-                {"role": "user", "content": user_instruction},
-                {"role": "assistant", "content": "Tool results provided. Continue and produce final checklist."},
-                *tool_messages,
-            ],
-            temperature=0.2,
-        )
-        output_text = followup.output_text
+    followup = client.responses.create(
+        model="gpt-5.1",
+        input=[
+            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": grounding_context},
+            {"role": "user", "content": user_instruction},
+            {"role": "assistant", "content": "Tool results provided. Continue and produce final checklist."},
+            *tool_messages,
+        ],
+        temperature=0.2,
+    )
+    output_text = followup.output_text
 
     return output_text
 
