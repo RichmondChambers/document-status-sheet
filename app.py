@@ -380,9 +380,9 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
         elif item.type == "output_text":
             output_text += item.text
 
-    # ---- If tools were called, resolve and follow up correctly ----
+        # If tools were called, resolve and follow up
     if pending_tool_calls:
-        tool_messages = []
+        tool_outputs = []
 
         for tc in pending_tool_calls:
             raw_args = getattr(tc, "arguments", None) or "{}"
@@ -403,27 +403,26 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
                 query=args.get("query"),
             )
 
-            tool_messages.append({
+            # ✅ Correct Responses-API tool output item
+            tool_outputs.append({
                 "type": "function_call_output",
                 "call_id": tc.id,
                 "output": json.dumps(tool_result),
             })
 
-        # ✅ This is the key fix: resume with previous_response_id
+        # ✅ Resume the same response thread
         followup = client.responses.create(
             model="gpt-5.1",
             previous_response_id=resp.id,
-            input=tool_messages,
+            input=tool_outputs,
             temperature=0.2,
         )
 
-        # First try output_text convenience attribute
+        # Safest way to read text across SDK variants
         output_text = getattr(followup, "output_text", "") or ""
-
-        # Fallback: assemble from output items
         if not output_text:
-            for item in iter_items(followup.output):
-                if item.type == "output_text":
+            for item in followup.output or []:
+                if getattr(item, "type", None) == "output_text":
                     output_text += item.text
 
     return output_text.strip()
