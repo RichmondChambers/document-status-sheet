@@ -12,3 +12,4 @@ google-auth-oauthlib
 python-docx
 PyJWT
 requests
+openpyxl
