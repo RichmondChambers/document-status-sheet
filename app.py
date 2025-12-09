@@ -421,17 +421,14 @@ def render_logo():
 
 
 def sanitize_for_sheets(tsv_text: str) -> str:
-    """
-    Safety net to:
-    - strip markdown pipes
-    - prevent Sheets formulas
-    - force exactly 7 columns per row
-    - merge overflow back into Client Notes if tabs leak
-    """
     lines = []
     for line in tsv_text.splitlines():
         line = line.replace("|", "")
+
+        # ✅ NEW: remove trailing tab-created empty columns
         cols = line.split("\t")
+        while cols and cols[-1] == "":
+            cols.pop()
 
         # If more than 7 cols, merge middle into Client Notes (col C)
         if len(cols) > 7:
