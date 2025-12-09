@@ -10,6 +10,8 @@ import streamlit.components.v1 as components
 from openai import OpenAI
 from pathlib import Path
 import base64
+import pandas as pd
+import io
 
 from index_builder import sync_drive_and_rebuild_index_if_needed, INDEX_FILE, METADATA_FILE
 
@@ -88,7 +90,6 @@ def google_login():
 # =========================
 # 1. Keys + Auth (OpenAI client)
 # =========================
-# Make sure this key exists in .streamlit/secrets.toml as OPENAI_API_KEY="..."
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 user_email = google_login()
 
@@ -349,7 +350,7 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
 
     # ---- First call (allow tools) ----
     resp = client.responses.create(
-        model="gpt-5.1",  # or swap to gpt-4.1-mini if access uncertain
+        model="gpt-5.1",
         input=[
             {"role": "system", "content": system_prompt},
             {"role": "system", "content": grounding_context},
@@ -476,6 +477,65 @@ def strip_authority_column(tsv_text: str) -> str:
             cols3 = ["Document", "Evidential Requirements", "Client Notes"]
         out_lines.append("\t".join(c.strip() for c in cols3))
     return "\n".join(out_lines).strip()
+
+
+def tsv_to_dataframe(tsv_text: str) -> pd.DataFrame:
+    """
+    Convert TSV text into a DataFrame.
+    Assumes first row is header.
+    """
+    if not tsv_text.strip():
+        return pd.DataFrame()
+    return pd.read_csv(io.StringIO(tsv_text), sep="\t", dtype=str).fillna("")
+
+
+def dataframe_to_formatted_xlsx_bytes(df: pd.DataFrame, sheet_name="Status Sheet") -> bytes:
+    """
+    Export DataFrame to a formatted Excel file (bytes):
+    - wrap text
+    - centre align
+    - bold headers
+    - freeze header row
+    - set column widths
+    """
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+        workbook = writer.book
+        worksheet = writer.sheets[sheet_name]
+
+        header_fmt = workbook.add_format({
+            "bold": True,
+            "text_wrap": True,
+            "align": "center",
+            "valign": "vcenter",
+            "border": 1
+        })
+        cell_fmt = workbook.add_format({
+            "text_wrap": True,
+            "align": "center",
+            "valign": "vcenter",
+            "border": 1
+        })
+
+        # Header formatting
+        for col_idx, col_name in enumerate(df.columns):
+            worksheet.write(0, col_idx, col_name, header_fmt)
+
+        # Body formatting
+        for row in range(1, len(df) + 1):
+            worksheet.set_row(row, None, cell_fmt)
+
+        worksheet.freeze_panes(1, 0)
+
+        # Column widths
+        for col_idx, col_name in enumerate(df.columns):
+            max_len = max([len(str(col_name))] + [len(str(v)) for v in df.iloc[:, col_idx].values])
+            width = min(max(max_len * 0.9, 18), 60)
+            worksheet.set_column(col_idx, col_idx, width, cell_fmt)
+
+    buffer.seek(0)
+    return buffer.read()
 
 
 # =========================
@@ -713,7 +773,19 @@ if submit and (route.strip() or facts.strip()):
 
         with tab_internal:
             st.write("Includes Rule Authority column for lawyer review.")
-            st.code(st.session_state.get("internal_tsv", reply), language="text")
+            internal_tsv = st.session_state.get("internal_tsv", reply)
+            st.code(internal_tsv, language="text")
+
+            # Formatted XLSX download (internal)
+            internal_df = tsv_to_dataframe(internal_tsv)
+            if not internal_df.empty:
+                internal_xlsx = dataframe_to_formatted_xlsx_bytes(internal_df, sheet_name="Internal Review")
+                st.download_button(
+                    "Download INTERNAL formatted Excel (.xlsx)",
+                    data=internal_xlsx,
+                    file_name="document_status_sheet_internal.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
 
         with tab_client:
             st.write("Click to generate a client-ready 3-column TSV (no authority column).")
@@ -733,6 +805,17 @@ if submit and (route.strip() or facts.strip()):
                     file_name="document_status_sheet_client.tsv",
                     mime="text/tab-separated-values"
                 )
+
+                # Formatted XLSX download (client)
+                client_df = tsv_to_dataframe(client_tsv)
+                if not client_df.empty:
+                    client_xlsx = dataframe_to_formatted_xlsx_bytes(client_df, sheet_name="Client Version")
+                    st.download_button(
+                        "Download CLIENT formatted Excel (.xlsx)",
+                        data=client_xlsx,
+                        file_name="document_status_sheet_client.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
             else:
                 st.info("Client version will appear here after you click the button.")
 
