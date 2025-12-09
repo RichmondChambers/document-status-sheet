@@ -466,8 +466,8 @@ def add_numbering_column(tsv_text: str) -> str:
 
     Rules:
     - Header row becomes: No. | Document | Evidential Requirements | Client Notes | Rule Authority
-    - Any heading/section row (first non-empty cell starts with "===") is NOT numbered,
-      even if the heading got shifted into a later column.
+    - ANY heading/section row (if ANY cell starts with "===") is NOT numbered.
+      This catches headings even if they shift columns.
     - Blank rows are not numbered.
     - Only true document rows get consecutive numbers.
     """
@@ -487,22 +487,21 @@ def add_numbering_column(tsv_text: str) -> str:
         elif len(cols) > 4:
             cols = cols[:3] + [" ".join(cols[3:])]
 
+        stripped_cols = [c.strip() for c in cols]
+
         # Header row
         if i == 0:
-            out.append("\t".join(["No."] + [c.strip() for c in cols]))
+            out.append("\t".join(["No."] + stripped_cols))
             continue
 
-        stripped_cols = [c.strip() for c in cols]
-        doc_cell = stripped_cols[0]
+        # Heading row if ANY cell starts with ===
+        is_heading = any(c.startswith("===") for c in stripped_cols if c)
 
-        # Find the first non-empty cell anywhere in the row
+        # First non-empty cell for blank-row detection
         first_non_empty = next((c for c in stripped_cols if c), "")
-
-        is_heading = first_non_empty.startswith("===")
         is_blank_row = first_non_empty == ""
 
-        # A "true" document row must have something in the Document column.
-        # (If heading text got shifted right, doc_cell will be empty.)
+        doc_cell = stripped_cols[0]  # "Document" column from model output
         is_true_document_row = (doc_cell != "") and (not is_heading)
 
         if is_blank_row or is_heading or not is_true_document_row:
