@@ -7,7 +7,6 @@ import json
 import requests
 import jwt  # PyJWT
 import streamlit.components.v1 as components
-from markdown_it import MarkdownIt
 from openai import OpenAI
 from pathlib import Path
 import base64
@@ -227,19 +226,28 @@ Hard rules:
 - Always reflect the April 2024 Appendix FM financial requirement (£29,000).
 - Do NOT say two passport-sized photos are required.
 
-Output rules:
-- Start every response with:
-  “The guidance below is based on the Immigration Rules as updated on {RULE_UPDATE_DATE}, per the Home Office updates page.”
-- Use clear headings and legal-professional tone suitable for case notes.
-- Present each checklist as THREE columns:
+Output rules (SPREADSHEET-READY TSV, CLIENT + LAWYER REVIEW):
+- You MUST output ONLY tab-separated values (TSV). No Markdown, no bullets, no numbering, no pipes "|".
+- Produce EXACTLY 4 columns per row:
   Column A: Document
-  Column B: Evidential Requirements
-  Column C: Notes (use for discretion/judgment calls; quote/cite rule).
-- Organise with Immigration-Rule-based sub-headings.
-- If multiple applicants: separate checklists with:
-  “==== Main Applicant ====”, “==== Dependent Partner ====”, etc.
-- If the user requests a filter, return only that subset and label it
-  “📄 Filtered Checklist: …”.
+  Column B: Evidential Requirements (what must be shown)
+  Column C: Client Notes (clear, client-ready explanation; no legalese)
+  Column D: Rule Authority (pinpoint paragraph reference + a SHORT supporting quotation)
+- First row MUST be the header exactly:
+  Document<TAB>Evidential Requirements<TAB>Client Notes<TAB>Rule Authority
+- Do NOT include any extra text before or after the TSV.
+- Put section titles as a standalone row in Column A only, like:
+  === Section: Financial Requirement ===<TAB><TAB><TAB>
+- NEVER start any cell with "=", "+", "-", or "@". If unavoidable, prefix that cell with "'".
+- Client Notes must be concise, readable, and suitable to send to a client.
+- Rule Authority must include:
+  (i) the rule/appendix + paragraph reference, and
+  (ii) a supporting quote no longer than ~25 words.
+- If a filter is requested:
+  * output ONLY that subset;
+  * begin with a section row:
+    === Filtered Checklist: {filter_label} ===<TAB><TAB><TAB>
+- If you cannot find supporting rule text using lookup_rule, state that briefly in Rule Authority and keep the document as "Recommended (not mandatory)" where appropriate.
 
 Link Appendix references to GOV.UK unless user asks otherwise.
 
@@ -247,7 +255,7 @@ Country-specificity:
 - If nationality or location is provided, add relevant country-specific evidence notes (TB test, approved English tests, apostille/translation norms), citing GOV.UK guidance.
 
 Legal Authority Summary:
-- If any rules cited, end with “Legal Authority Summary” listing each cited rule with GOV.UK hyperlink + one-line scope.
+- Do NOT include a separate summary section. All authority must be in Column D only.
 """
 
 
@@ -284,7 +292,7 @@ def lookup_rule_tool(appendix_or_part, paragraph_ref=None, query=None):
 # =========================
 # 8. Model call with tool loop (HARDENED)
 # =========================
-def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filter_mode=None):
+def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filter_mode=None, filter_label=None):
     rule_date = fetch_latest_rule_update_date()
     system_prompt = BASE_SYSTEM_PROMPT.replace("{RULE_UPDATE_DATE}", rule_date)
 
@@ -317,7 +325,10 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
 
     user_instruction = enquiry_text
     if filter_mode:
-        user_instruction += f"\n\nFILTER REQUEST: {filter_mode}"
+        user_instruction += (
+            f"\n\nFILTER LABEL: {filter_label}\n"
+            f"FILTER REQUEST: {filter_mode}"
+        )
 
     tools = [
         {
@@ -417,6 +428,54 @@ def render_logo():
         )
     else:
         st.warning(f"Logo not found at {logo_path}")
+
+
+def sanitize_for_sheets(tsv_text: str) -> str:
+    """
+    Safety net to:
+    - strip any stray markdown pipes
+    - prevent Sheets formula parsing
+    - force exactly 4 columns per row (pad/merge)
+    """
+    lines = []
+    for line in tsv_text.splitlines():
+        line = line.replace("|", "")
+        cols = line.split("\t")
+
+        if len(cols) < 4:
+            cols = cols + [""] * (4 - len(cols))
+        elif len(cols) > 4:
+            cols = cols[:3] + [" ".join(cols[3:])]
+
+        safe_cols = []
+        for c in cols:
+            c = c.strip()
+            if c.startswith(("=", "+", "-", "@")):
+                c = "'" + c
+            safe_cols.append(c)
+
+        lines.append("\t".join(safe_cols))
+
+    return "\n".join(lines).strip()
+
+
+def strip_authority_column(tsv_text: str) -> str:
+    """
+    Convert 4-column TSV:
+      Document, Evidential Requirements, Client Notes, Rule Authority
+    into 3-column TSV by removing Column D.
+    Keeps section rows intact.
+    """
+    out_lines = []
+    for i, line in enumerate(tsv_text.splitlines()):
+        cols = line.split("\t")
+        if len(cols) < 4:
+            cols = cols + [""] * (4 - len(cols))
+        cols3 = cols[:3]
+        if i == 0:
+            cols3 = ["Document", "Evidential Requirements", "Client Notes"]
+        out_lines.append("\t".join(c.strip() for c in cols3))
+    return "\n".join(out_lines).strip()
 
 
 # =========================
@@ -594,7 +653,7 @@ st.markdown(
 st.markdown(
     "Provide the immigration route and the case facts in separate fields. "
     "The app will generate a rule-based document status sheet "
-    "in 3 columns suitable for Google Sheets, with exact rule quotations."
+    "in 4 columns suitable for Google Sheets, with client-ready notes and rule authority."
 )
 
 uploaded_doc = st.file_uploader(
@@ -639,13 +698,43 @@ if submit and (route.strip() or facts.strip()):
             route_text=route,
             facts_text=facts,
             extra_route_facts_text=extra_text,
-            filter_mode=filter_instruction
+            filter_mode=filter_instruction,
+            filter_label=filter_label
         )
+
+        reply = sanitize_for_sheets(reply)
+        st.session_state["internal_tsv"] = reply
+        st.session_state.pop("client_tsv", None)  # reset client version on new run
 
         st.success("Status sheet generated.")
 
-        st.subheader("Status Sheet Output (copy into Google Sheets)")
-        st.text_area("Status Sheet", value=reply, height=650)
+        st.subheader("Status Sheet Output")
+        tab_internal, tab_client = st.tabs(["Internal review (4 columns)", "Client version (3 columns)"])
+
+        with tab_internal:
+            st.write("Includes Rule Authority column for lawyer review.")
+            st.code(st.session_state.get("internal_tsv", reply), language="text")
+
+        with tab_client:
+            st.write("Click to generate a client-ready 3-column TSV (no authority column).")
+            make_client = st.button("Generate client version (strip Rule Authority)")
+
+            if make_client:
+                internal_tsv = st.session_state.get("internal_tsv", "")
+                client_tsv = strip_authority_column(internal_tsv) if internal_tsv else ""
+                st.session_state["client_tsv"] = client_tsv
+
+            client_tsv = st.session_state.get("client_tsv", "")
+            if client_tsv:
+                st.code(client_tsv, language="text")
+                st.download_button(
+                    "Download client TSV",
+                    data=client_tsv,
+                    file_name="document_status_sheet_client.tsv",
+                    mime="text/tab-separated-values"
+                )
+            else:
+                st.info("Client version will appear here after you click the button.")
 
         st.markdown(
             """
@@ -661,10 +750,7 @@ if submit and (route.strip() or facts.strip()):
             unsafe_allow_html=False,
         )
 
-        # Copy button
-        md = MarkdownIt()
-        html_reply = md.render(reply)
-
+        # Copy button (copies internal TSV by default)
         components.html(
             f"""
             <style>
@@ -680,23 +766,17 @@ if submit and (route.strip() or facts.strip()):
             .copy-button:hover {{ background-color: #4a4a4a; }}
             </style>
 
-            <button class="copy-button" onclick="copyToClipboard()">📋 Copy to Clipboard</button>
+            <button class="copy-button" onclick="copyToClipboard()">📋 Copy internal TSV to Clipboard</button>
 
             <script>
             async function copyToClipboard() {{
-                const htmlContent = `{html_reply.replace("`", "\\`")}`;
                 const plainText = `{reply.replace("`", "\\`")}`;
-
-                const blobHtml = new Blob([htmlContent], {{ type: 'text/html' }});
                 const blobText = new Blob([plainText], {{ type: 'text/plain' }});
-
                 const clipboardItem = new ClipboardItem({{
-                    'text/html': blobHtml,
                     'text/plain': blobText
                 }});
-
                 await navigator.clipboard.write([clipboardItem]);
-                alert("Copied! Paste into Gmail/Docs/Sheets.");
+                alert("Copied! Paste into Google Sheets.");
             }}
             </script>
             """,
