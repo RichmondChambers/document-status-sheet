@@ -933,9 +933,8 @@ st.markdown(
 )
 
 st.markdown(
-    "Provide the immigration route and the case facts in separate fields. "
-    "The app will generate a rule-based document status sheet "
-    "with numbering, client notes, GDrive Link, Ready To Review, Status, and rule authority."
+    "Provide the immigration route and relevant case facts in separate fields. "
+    "The app will generate a rules-based DSS. "
 )
 
 st.info(
@@ -945,13 +944,13 @@ st.info(
 )
 
 uploaded_doc = st.file_uploader(
-    "Optional: upload a document describing the route and facts.",
+    "Optional: upload a document describing the immigration route and relevant facts.",
     type=["pdf", "txt", "docx"],
     help="E.g., case summary, client instructions, or notes setting out the route and facts."
 )
 
 filter_label = st.selectbox(
-    "Checklist filter (optional)",
+    "DSS filter (optional)",
     list(FILTER_OPTIONS.keys()),
     index=0
 )
@@ -959,12 +958,12 @@ filter_instruction = FILTER_OPTIONS[filter_label]
 
 with st.form("checklist_form"):
     route = st.text_area(
-        "Route",
+        "Immigration Route",
         height=140,
         placeholder="Example:\nSpouse visa extension under Appendix FM."
     )
     facts = st.text_area(
-        "Facts (include applicant nationality/location if relevant)",
+        "Relevant Facts",
         height=260,
         placeholder=(
             "Example:\n"
@@ -977,7 +976,7 @@ with st.form("checklist_form"):
 
 
 if submit and (route.strip() or facts.strip()):
-    with st.spinner("Retrieving Rules, checking precedents, and generating status sheet..."):
+    with st.spinner("Retrieving Rules, checking precedents, and generating DSS..."):
         extra_text = None
         if uploaded_doc is not None:
             extra_text = extract_text_from_uploaded_file(uploaded_doc)
