@@ -543,6 +543,10 @@ def remove_blank_rows(tsv_text: str) -> str:
 def add_numbering_column(tsv_text: str) -> str:
     """
     Add leftmost numbering column ("No.") so only document rows are numbered.
+
+    NEW behaviour:
+    - For section rows, move the section heading into Column A (No.)
+      and blank the rest of the row. This makes headings appear in Column A.
     """
     lines = tsv_text.splitlines()
     if not lines:
@@ -559,18 +563,23 @@ def add_numbering_column(tsv_text: str) -> str:
             cols = cols[:5] + [" ".join(cols[5:])]
 
         stripped_cols = [c.strip() for c in cols]
+        doc_cell_norm = stripped_cols[0].lstrip("'").strip()
 
         if i == 0:
             out.append("\t".join(["No."] + stripped_cols))
             continue
 
-        doc_cell_norm = stripped_cols[0].lstrip("'").strip()
         is_heading = is_section_heading_row([doc_cell_norm])
         is_blank_row = doc_cell_norm == ""
-
         is_true_document_row = (doc_cell_norm != "") and (not is_heading)
 
-        if is_blank_row or is_heading or not is_true_document_row:
+        if is_heading:
+            heading_text = stripped_cols[0]
+            # Put heading in Column A, blank rest
+            out.append("\t".join([heading_text] + [""] * 6))
+            continue
+
+        if is_blank_row or not is_true_document_row:
             out.append("\t".join([""] + stripped_cols))
         else:
             counter += 1
@@ -620,7 +629,7 @@ def add_ready_checkboxes(tsv_text: str) -> str:
             continue
 
         doc_cell = stripped_cols[doc_idx].lstrip("'").strip()
-        is_heading = is_section_heading_row([doc_cell])
+        is_heading = is_section_heading_row([doc_cell]) or stripped_cols[0].lstrip("'").strip().startswith("Section")
         is_blank_row = doc_cell == ""
 
         is_document_row = (doc_cell != "") and (not is_heading) and (not is_blank_row)
@@ -680,7 +689,7 @@ def dataframe_to_formatted_xlsx_bytes(df: pd.DataFrame, sheet_name="Status Sheet
     - bold header
     - freeze row 1
     - borders
-    - bold + RC brand fill for Section rows
+    - section rows: brand blue #009fdf, white bold text, merged across row, left aligned
     """
     try:
         from openpyxl import Workbook
@@ -702,10 +711,12 @@ def dataframe_to_formatted_xlsx_bytes(df: pd.DataFrame, sheet_name="Status Sheet
     header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     cell_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
+    # Brand colour fill (exact #009fdf)
     section_fill = PatternFill("solid", fgColor="009FDF")
     section_font = Font(bold=True, color="FFFFFF")
+    section_alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
-    # Header
+    # Header row
     ws.append(list(df.columns))
     for col_idx in range(1, len(df.columns) + 1):
         cell = ws.cell(row=1, column=col_idx)
@@ -714,24 +725,37 @@ def dataframe_to_formatted_xlsx_bytes(df: pd.DataFrame, sheet_name="Status Sheet
         cell.border = border
 
     # Body
-    numbered = (len(df.columns) > 0 and str(df.columns[0]).strip().lower() in ("no.", "no", "#"))
     for row_vals in df.itertuples(index=False):
         ws.append(list(row_vals))
 
-    # Style rows
+    # Style + merge section rows
     for r_idx in range(2, ws.max_row + 1):
-        section_cell_idx = 2 if numbered else 1  # B if numbered, A if not
-        section_text = str(ws.cell(row=r_idx, column=section_cell_idx).value or "").strip()
-        is_section = section_text.startswith("Section ") or section_text.startswith("Filtered Checklist")
+        row_values = [
+            str(ws.cell(row=r_idx, column=c_idx).value or "").strip()
+            for c_idx in range(1, ws.max_column + 1)
+        ]
+        is_section = any(
+            v.startswith("Section ") or v.startswith("Filtered Checklist")
+            for v in row_values if v
+        )
 
         for c_idx in range(1, ws.max_column + 1):
             cell = ws.cell(row=r_idx, column=c_idx)
-            cell.alignment = cell_alignment
             cell.border = border
+            cell.alignment = cell_alignment
 
             if is_section:
                 cell.font = section_font
                 cell.fill = section_fill
+
+        if is_section:
+            # Merge full row across all columns
+            ws.merge_cells(
+                start_row=r_idx, start_column=1,
+                end_row=r_idx, end_column=ws.max_column
+            )
+            # Left align the merged top-left cell
+            ws.cell(row=r_idx, column=1).alignment = section_alignment
 
     ws.freeze_panes = "A2"
 
@@ -956,8 +980,8 @@ if submit and (route.strip() or facts.strip()):
 
         reply = sanitize_for_sheets(reply)
         reply = reletter_section_headings(reply)
-        reply = remove_blank_rows(reply)     # <-- removes spacer rows
-        reply = add_numbering_column(reply)
+        reply = remove_blank_rows(reply)      # no blank spacer rows
+        reply = add_numbering_column(reply)   # section headings moved to Col A
         reply = add_ready_checkboxes(reply)
 
         st.session_state["internal_tsv"] = reply
