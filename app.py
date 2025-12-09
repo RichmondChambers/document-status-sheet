@@ -544,9 +544,8 @@ def add_numbering_column(tsv_text: str) -> str:
     """
     Add leftmost numbering column ("No.") so only document rows are numbered.
 
-    NEW behaviour:
-    - For section rows, move the section heading into Column A (No.)
-      and blank the rest of the row. This makes headings appear in Column A.
+    For section rows, move the heading into Column A (No.)
+    and blank the rest of the row.
     """
     lines = tsv_text.splitlines()
     if not lines:
@@ -575,7 +574,6 @@ def add_numbering_column(tsv_text: str) -> str:
 
         if is_heading:
             heading_text = stripped_cols[0]
-            # Put heading in Column A, blank rest
             out.append("\t".join([heading_text] + [""] * 6))
             continue
 
@@ -711,8 +709,12 @@ def dataframe_to_formatted_xlsx_bytes(df: pd.DataFrame, sheet_name="Status Sheet
     header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     cell_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-    # Brand colour fill (exact #009fdf)
-    section_fill = PatternFill("solid", fgColor="009FDF")
+    # Brand colour fill — force ARGB to stop Google Sheets tinting
+    section_fill = PatternFill(
+        fill_type="solid",
+        start_color="FF009FDF",
+        end_color="FF009FDF"
+    )
     section_font = Font(bold=True, color="FFFFFF")
     section_alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
@@ -749,12 +751,10 @@ def dataframe_to_formatted_xlsx_bytes(df: pd.DataFrame, sheet_name="Status Sheet
                 cell.fill = section_fill
 
         if is_section:
-            # Merge full row across all columns
             ws.merge_cells(
                 start_row=r_idx, start_column=1,
                 end_row=r_idx, end_column=ws.max_column
             )
-            # Left align the merged top-left cell
             ws.cell(row=r_idx, column=1).alignment = section_alignment
 
     ws.freeze_panes = "A2"
@@ -980,8 +980,8 @@ if submit and (route.strip() or facts.strip()):
 
         reply = sanitize_for_sheets(reply)
         reply = reletter_section_headings(reply)
-        reply = remove_blank_rows(reply)      # no blank spacer rows
-        reply = add_numbering_column(reply)   # section headings moved to Col A
+        reply = remove_blank_rows(reply)
+        reply = add_numbering_column(reply)
         reply = add_ready_checkboxes(reply)
 
         st.session_state["internal_tsv"] = reply
@@ -1059,7 +1059,6 @@ if submit and (route.strip() or facts.strip()):
             unsafe_allow_html=False,
         )
 
-        # Copy button (copies internal TSV)
         components.html(
             f"""
             <style>
