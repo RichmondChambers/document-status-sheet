@@ -27,9 +27,10 @@ def google_login():
     if "user_email" in st.session_state:
         return st.session_state["user_email"]
 
-    params = st.experimental_get_query_params()
+    # UPDATED: Streamlit query params API
+    params = st.query_params
     if "code" in params:
-        code = params["code"][0]
+        code = params["code"]
 
         token_response = requests.post(
             "https://oauth2.googleapis.com/token",
@@ -462,9 +463,7 @@ def sanitize_for_sheets(tsv_text: str) -> str:
 
 def strip_authority_column(tsv_text: str) -> str:
     """
-    Convert 4-column TSV:
-      Document, Evidential Requirements, Client Notes, Rule Authority
-    into 3-column TSV by removing Column D.
+    Convert 4-column TSV into 3-column TSV by removing Column D.
     Keeps section rows intact.
     """
     out_lines = []
@@ -491,49 +490,62 @@ def tsv_to_dataframe(tsv_text: str) -> pd.DataFrame:
 
 def dataframe_to_formatted_xlsx_bytes(df: pd.DataFrame, sheet_name="Status Sheet") -> bytes:
     """
-    Export DataFrame to a formatted Excel file (bytes):
+    Export DataFrame to a formatted Excel file (bytes) using openpyxl:
     - wrap text
     - centre align
-    - bold headers
-    - freeze header row
+    - bold header
+    - freeze row 1
     - set column widths
     """
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font, Border, Side
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        raise ImportError(
+            "openpyxl is required for formatted Excel export. "
+            "Add 'openpyxl' to requirements.txt."
+        )
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_name
+
+    thin = Side(style="thin", color="000000")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    cell_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    # Write header
+    ws.append(list(df.columns))
+    for col_idx in range(1, len(df.columns) + 1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.font = Font(bold=True)
+        cell.alignment = header_alignment
+        cell.border = border
+
+    # Write body
+    for row_vals in df.itertuples(index=False):
+        ws.append(list(row_vals))
+
+    for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
+        for cell in row:
+            cell.alignment = cell_alignment
+            cell.border = border
+
+    # Freeze header row
+    ws.freeze_panes = "A2"
+
+    # Column widths
+    for col_idx, col_name in enumerate(df.columns, start=1):
+        values = [str(col_name)] + [str(v) for v in df.iloc[:, col_idx - 1].values]
+        max_len = max(len(v) for v in values)
+        width = min(max(max_len * 0.9, 18), 60)
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+
     buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
-        df.to_excel(writer, index=False, sheet_name=sheet_name)
-        workbook = writer.book
-        worksheet = writer.sheets[sheet_name]
-
-        header_fmt = workbook.add_format({
-            "bold": True,
-            "text_wrap": True,
-            "align": "center",
-            "valign": "vcenter",
-            "border": 1
-        })
-        cell_fmt = workbook.add_format({
-            "text_wrap": True,
-            "align": "center",
-            "valign": "vcenter",
-            "border": 1
-        })
-
-        # Header formatting
-        for col_idx, col_name in enumerate(df.columns):
-            worksheet.write(0, col_idx, col_name, header_fmt)
-
-        # Body formatting
-        for row in range(1, len(df) + 1):
-            worksheet.set_row(row, None, cell_fmt)
-
-        worksheet.freeze_panes(1, 0)
-
-        # Column widths
-        for col_idx, col_name in enumerate(df.columns):
-            max_len = max([len(str(col_name))] + [len(str(v)) for v in df.iloc[:, col_idx].values])
-            width = min(max(max_len * 0.9, 18), 60)
-            worksheet.set_column(col_idx, col_idx, width, cell_fmt)
-
+    wb.save(buffer)
     buffer.seek(0)
     return buffer.read()
 
@@ -779,13 +791,16 @@ if submit and (route.strip() or facts.strip()):
             # Formatted XLSX download (internal)
             internal_df = tsv_to_dataframe(internal_tsv)
             if not internal_df.empty:
-                internal_xlsx = dataframe_to_formatted_xlsx_bytes(internal_df, sheet_name="Internal Review")
-                st.download_button(
-                    "Download INTERNAL formatted Excel (.xlsx)",
-                    data=internal_xlsx,
-                    file_name="document_status_sheet_internal.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+                try:
+                    internal_xlsx = dataframe_to_formatted_xlsx_bytes(internal_df, sheet_name="Internal Review")
+                    st.download_button(
+                        "Download INTERNAL formatted Excel (.xlsx)",
+                        data=internal_xlsx,
+                        file_name="document_status_sheet_internal.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                except Exception as e:
+                    st.warning(f"Formatted Excel export unavailable: {e}")
 
         with tab_client:
             st.write("Click to generate a client-ready 3-column TSV (no authority column).")
@@ -809,13 +824,16 @@ if submit and (route.strip() or facts.strip()):
                 # Formatted XLSX download (client)
                 client_df = tsv_to_dataframe(client_tsv)
                 if not client_df.empty:
-                    client_xlsx = dataframe_to_formatted_xlsx_bytes(client_df, sheet_name="Client Version")
-                    st.download_button(
-                        "Download CLIENT formatted Excel (.xlsx)",
-                        data=client_xlsx,
-                        file_name="document_status_sheet_client.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
+                    try:
+                        client_xlsx = dataframe_to_formatted_xlsx_bytes(client_df, sheet_name="Client Version")
+                        st.download_button(
+                            "Download CLIENT formatted Excel (.xlsx)",
+                            data=client_xlsx,
+                            file_name="document_status_sheet_client.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                    except Exception as e:
+                        st.warning(f"Formatted Excel export unavailable: {e}")
             else:
                 st.info("Client version will appear here after you click the button.")
 
