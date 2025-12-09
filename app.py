@@ -80,7 +80,7 @@ def google_login():
         "&access_type=offline"
     )
 
-    st.markdown("### Richmond Chambers – DSS Generator")
+    st.markdown("### Richmond Chambers – Internal Tool")
     st.write("Please sign in with a Richmond Chambers Google Workspace account to access this app.")
     st.markdown(f"[Sign in with Google]({auth_url})")
     st.stop()
@@ -316,7 +316,7 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
         grounding_context += extra_route_facts_text.strip()
 
     user_instruction = enquiry_text
-    if filter_mode and filter_mode != "Full checklist":
+    if filter_mode:
         user_instruction += f"\n\nFILTER REQUEST: {filter_mode}"
 
     tools = [
@@ -397,7 +397,7 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
 
 
 # =========================
-# 9. Streamlit UI
+# 9. Streamlit UI helpers
 # =========================
 def render_logo():
     """
@@ -419,6 +419,165 @@ def render_logo():
         st.warning(f"Logo not found at {logo_path}")
 
 
+# =========================
+# Filter options (label -> precise model instruction)
+# =========================
+FILTER_OPTIONS = {
+    "Full checklist": None,
+
+    "Mandatory documents only": (
+        "Return ONLY documents that are strictly mandatory under the Immigration Rules or Home Office guidance "
+        "(i.e., specified evidence or items without which the application is likely to be refused/invalid). "
+        "Exclude purely recommended/supporting documents unless they are needed to satisfy a mandatory requirement."
+    ),
+
+    "Identity / nationality evidence only": (
+        "Return ONLY identity and nationality evidence. Include passports/travel documents, BRP/eVisa status proof, "
+        "national ID cards, biometrics/photo requirements where relevant, name-change evidence, and any identity-linked "
+        "civil documents. Exclude financial, relationship, accommodation, or other categories."
+    ),
+
+    "Immigration history / status evidence only": (
+        "Return ONLY evidence relating to the applicant’s UK immigration history and current/previous status. "
+        "Include current grant/leave evidence, visa vignettes, entry/exit stamps, prior approvals/refusals/curtailments, "
+        "overstay or breach explanations, conditions of leave, and any required history disclosures."
+    ),
+
+    "Application forms / administrative evidence only": (
+        "Return ONLY administrative/process documents needed to lodge the application. "
+        "Include online application form confirmation, IHS/payment receipts, appointment/biometrics confirmation, "
+        "consent forms, document checklists, and any required declarations. "
+        "Include translation/certification requirements ONLY insofar as they relate to admin validity."
+    ),
+
+    "Financial requirement evidence only": (
+        "Return ONLY evidence proving the financial requirement for the route. "
+        "Include specified evidence per the Rules/guidance: payslips, bank statements, employer letters, tax returns, "
+        "audited/unaudited accounts, dividend vouchers, savings evidence, pension evidence, benefits letters, "
+        "and evidence of source/ownership of funds where required."
+    ),
+
+    "Accommodation evidence only": (
+        "Return ONLY evidence proving adequate accommodation. "
+        "Include tenancy/mortgage documents, landlord/freeholder consent, property ownership proof, "
+        "property inspection/overcrowding reports where relevant, utilities/council tax if used to prove residence, "
+        "and sponsor residence proof tied to accommodation adequacy."
+    ),
+
+    "English language evidence only": (
+        "Return ONLY evidence proving English language requirement or exemption. "
+        "Include approved SELT certificate, degree taught in English plus ECCTIS/UK NARIC comparability if required, "
+        "nationality-based exemptions, age/medical exemptions with supporting proof."
+    ),
+
+    "Relationship / family evidence only": (
+        "Return ONLY evidence proving relationship/family link. "
+        "Include marriage/civil partnership certificates, divorce/death certificates, evidence of durable partnership, "
+        "cohabitation evidence, communication/interaction evidence, family composition proof. "
+        "Exclude genuineness-focused narrative unless it is part of proving the relationship."
+    ),
+
+    "Genuine relationship / genuine intention evidence only": (
+        "Return ONLY evidence aimed at demonstrating a genuine relationship or genuine intention to live together/continue "
+        "the relationship (where required). "
+        "Include relationship timeline, communications, visits, shared life evidence, joint commitments, "
+        "statements addressing genuineness. Exclude civil status documents unless needed to support genuineness."
+    ),
+
+    "Employment / role evidence only": (
+        "Return ONLY evidence of a job/role where employment is a core requirement. "
+        "Include CoS, job offer/contract, SOC code fit evidence, salary breakdown, start date confirmation, "
+        "sponsor licence/status proof, employer letters describing duties. "
+        "Exclude general financial evidence unless required to prove salary for the role."
+    ),
+
+    "Qualifications / skills evidence only": (
+        "Return ONLY evidence of qualifications/skills relevant to eligibility. "
+        "Include degree certificates/transcripts, professional qualifications, registrations/licences, "
+        "ATAS if applicable, evidence of equivalency or recognition where required."
+    ),
+
+    "Maintenance / funds evidence only (non-salary routes)": (
+        "Return ONLY evidence of maintenance/funds where the route requires proof of funds rather than salary "
+        "(e.g., Student/Visitor/PBS dependants). "
+        "Include bank statements showing required level and holding period, proof of ownership/control, "
+        "sponsor undertaking where permitted, financial consent letters if jointly held."
+    ),
+
+    "Sponsor evidence only": (
+        "Return ONLY evidence relating to the sponsor. "
+        "Include sponsor identity/status (passport/BRP/eVisa/ILR/citizenship), immigration permission, "
+        "residence in the UK if required, sponsor employment/financial documents only where sponsor-led financial "
+        "requirements apply."
+    ),
+
+    "Dependants’ evidence only": (
+        "Return ONLY evidence needed for dependants (partner/children/other dependants). "
+        "Include relationship to main applicant, dependency evidence, age evidence, living arrangements, "
+        "and route-specific dependant requirements."
+    ),
+
+    "Children / parental responsibility evidence only": (
+        "Return ONLY evidence concerning children and parental responsibility. "
+        "Include full birth certificates, adoption/custody orders, parental consent letters, "
+        "sole responsibility evidence, evidence of child’s residence, school/medical records where used to show care."
+    ),
+
+    "Study / CAS evidence only": (
+        "Return ONLY study-related evidence for Student routes. "
+        "Include CAS statement/number, offer letters, course details, tuition payment evidence if relevant, "
+        "academic progression evidence, ATAS where required."
+    ),
+
+    "Business / investment evidence only": (
+        "Return ONLY business/investment-related evidence for entrepreneurship/investor/GBM/self-sponsorship style routes. "
+        "Include business plans, company registration/ownership, corporate structures, share certificates, "
+        "investment source and availability evidence, contracts/invoices, overseas business link evidence for GBM routes."
+    ),
+
+    "TB / medical evidence only": (
+        "Return ONLY TB/medical evidence. "
+        "Include TB test certificates from approved clinics where required, "
+        "medical evidence supporting exemptions or compassionate/discretionary factors where relevant."
+    ),
+
+    "Criminality / character evidence only": (
+        "Return ONLY evidence relating to criminality/character. "
+        "Include police certificates where required, court records, sentencing details, rehabilitation evidence, "
+        "and explanatory statements addressing character/suitability."
+    ),
+
+    "Suitability / refusal-risk evidence only": (
+        "Return ONLY evidence aimed at addressing suitability or refusal risks. "
+        "Include explanations and proof relating to deception concerns, overstays/breaches, sham/genuineness doubts, "
+        "credibility gaps, inconsistencies, previous refusals, and mitigation evidence."
+    ),
+
+    "Exceptional circumstances / discretion evidence only": (
+        "Return ONLY evidence supporting exceptional circumstances or discretionary grants. "
+        "Include Article 8/private and family life factors, compelling compassionate evidence, hardship, "
+        "best-interests-of-child materials, medical dependency evidence, "
+        "and any other materials supporting discretion outside strict rule satisfaction."
+    ),
+
+    "Translations / format / copy certification evidence only": (
+        "Return ONLY evidence about translations, formatting, and certification. "
+        "Include requirements for certified translations, translator credentials, "
+        "copy certification wording, legibility/completeness requirements (e.g., all pages of statements), "
+        "and document date/validity formatting rules."
+    ),
+
+    "Country-specific evidence only": (
+        "Return ONLY country-specific evidence requirements triggered by nationality/location. "
+        "Include TB test triggers, local civil document formats, apostille/legalisation norms, "
+        "approved test availability by country, and any region-specific Home Office requirements."
+    ),
+}
+
+
+# =========================
+# 10. Streamlit UI
+# =========================
 render_logo()
 
 st.markdown(
@@ -433,7 +592,7 @@ st.markdown(
 )
 
 st.markdown(
-    "Provide the immigration route and relevant case facts in separate fields. "
+    "Provide the immigration route and the case facts in separate fields. "
     "The app will generate a rule-based document status sheet "
     "in 3 columns suitable for Google Sheets, with exact rule quotations."
 )
@@ -444,40 +603,34 @@ uploaded_doc = st.file_uploader(
     help="E.g., case summary, client instructions, or notes setting out the route and facts."
 )
 
-filter_mode = st.selectbox(
+filter_label = st.selectbox(
     "Checklist filter (optional)",
-    [
-        "Full checklist",
-        "Mandatory documents only",
-        "Financial evidence only",
-        "Identity / nationality documents only",
-        "Relationship evidence only",
-        "Immigration history only",
-    ],
+    list(FILTER_OPTIONS.keys()),
     index=0
 )
+filter_instruction = FILTER_OPTIONS[filter_label]
 
 with st.form("checklist_form"):
     route = st.text_area(
-        "Immigration Route",
+        "Route",
         height=140,
         placeholder="Example:\nSpouse visa extension under Appendix FM."
     )
     facts = st.text_area(
-        "Relevant Facts",
+        "Facts (include applicant nationality/location if relevant)",
         height=260,
         placeholder=(
             "Example:\n"
             "Sponsor is British citizen. Applicant is Swiss, applying from London. "
             "Relationship married 3 years, cohabiting. Salaried income £35,000. "
-            "One child British. Need a rules-based document status sheet."
+            "One child British. Need a rule-based document status sheet."
         )
     )
-    submit = st.form_submit_button("Generate DSS")
+    submit = st.form_submit_button("Generate Status Sheet")
 
 
 if submit and (route.strip() or facts.strip()):
-    with st.spinner("Retrieving Rules, checking precedents, and generating DSS..."):
+    with st.spinner("Retrieving Rules, checking precedents, and generating status sheet..."):
         extra_text = None
         if uploaded_doc is not None:
             extra_text = extract_text_from_uploaded_file(uploaded_doc)
@@ -486,10 +639,10 @@ if submit and (route.strip() or facts.strip()):
             route_text=route,
             facts_text=facts,
             extra_route_facts_text=extra_text,
-            filter_mode=filter_mode
+            filter_mode=filter_instruction
         )
 
-        st.success("DSS generated.")
+        st.success("Status sheet generated.")
 
         st.subheader("Status Sheet Output (copy into Google Sheets)")
         st.text_area("Status Sheet", value=reply, height=650)
