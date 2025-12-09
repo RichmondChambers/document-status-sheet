@@ -10,6 +10,7 @@ import streamlit.components.v1 as components
 from markdown_it import MarkdownIt
 from openai import OpenAI
 from pathlib import Path
+import base64
 
 from index_builder import sync_drive_and_rebuild_index_if_needed, INDEX_FILE, METADATA_FILE
 
@@ -401,13 +402,19 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
 def render_logo():
     """
     Load logo.png from the repo root (same folder as this app.py),
-    and render it at the top of the app.
+    embed as base64, and center it perfectly with HTML/CSS.
     """
     logo_path = Path(__file__).parent / "logo.png"
     if logo_path.exists():
-        cols = st.columns([1, 2, 1])
-        with cols[1]:
-            st.image(str(logo_path), width=150)
+        b64 = base64.b64encode(logo_path.read_bytes()).decode()
+        st.markdown(
+            f"""
+            <div style="display: flex; justify-content: center; padding-bottom: 10px;">
+                <img src="data:image/png;base64,{b64}" width="150">
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
     else:
         st.warning(f"Logo not found at {logo_path}")
 
