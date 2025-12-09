@@ -80,7 +80,7 @@ def google_login():
         "&access_type=offline"
     )
 
-    st.markdown("### Richmond Chambers – Internal Tool")
+    st.markdown("### Richmond Chambers – DSS Generator")
     st.write("Please sign in with a Richmond Chambers Google Workspace account to access this app.")
     st.markdown(f"[Sign in with Google]({auth_url})")
     st.stop()
@@ -433,7 +433,7 @@ st.markdown(
 )
 
 st.markdown(
-    "Provide the immigration route and the case facts in separate fields. "
+    "Provide the immigration route and relevant case facts in separate fields. "
     "The app will generate a rule-based document status sheet "
     "in 3 columns suitable for Google Sheets, with exact rule quotations."
 )
@@ -459,25 +459,25 @@ filter_mode = st.selectbox(
 
 with st.form("checklist_form"):
     route = st.text_area(
-        "Route",
+        "Immigration Route",
         height=140,
         placeholder="Example:\nSpouse visa extension under Appendix FM."
     )
     facts = st.text_area(
-        "Facts (include applicant nationality/location if relevant)",
+        "Relevant Facts",
         height=260,
         placeholder=(
             "Example:\n"
             "Sponsor is British citizen. Applicant is Swiss, applying from London. "
             "Relationship married 3 years, cohabiting. Salaried income £35,000. "
-            "One child British. Need a rule-based document status sheet."
+            "One child British. Need a rules-based document status sheet."
         )
     )
-    submit = st.form_submit_button("Generate Status Sheet")
+    submit = st.form_submit_button("Generate DSS")
 
 
 if submit and (route.strip() or facts.strip()):
-    with st.spinner("Retrieving Rules, checking precedents, and generating status sheet..."):
+    with st.spinner("Retrieving Rules, checking precedents, and generating DSS..."):
         extra_text = None
         if uploaded_doc is not None:
             extra_text = extract_text_from_uploaded_file(uploaded_doc)
@@ -489,7 +489,7 @@ if submit and (route.strip() or facts.strip()):
             filter_mode=filter_mode
         )
 
-        st.success("Status sheet generated.")
+        st.success("DSS generated.")
 
         st.subheader("Status Sheet Output (copy into Google Sheets)")
         st.text_area("Status Sheet", value=reply, height=650)
