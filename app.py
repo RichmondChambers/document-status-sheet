@@ -27,7 +27,6 @@ def google_login():
     if "user_email" in st.session_state:
         return st.session_state["user_email"]
 
-    # UPDATED: Streamlit query params API
     params = st.query_params
     if "code" in params:
         code = params["code"]
@@ -461,20 +460,79 @@ def sanitize_for_sheets(tsv_text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def add_numbering_column(tsv_text: str) -> str:
+    """
+    Add a leftmost numbering column ("No.").
+
+    Rules:
+    - Header row becomes: No. | Document | Evidential Requirements | Client Notes | Rule Authority
+    - Section/heading rows (Document cell starts with "===") are NOT numbered.
+    - Blank rows are not numbered.
+    - Only real document rows get consecutive numbers.
+    """
+    lines = tsv_text.splitlines()
+    if not lines:
+        return tsv_text
+
+    out = []
+    counter = 0
+
+    for i, line in enumerate(lines):
+        cols = line.split("\t")
+
+        # Ensure at least 4 cols before numbering
+        if len(cols) < 4:
+            cols = cols + [""] * (4 - len(cols))
+        elif len(cols) > 4:
+            cols = cols[:3] + [" ".join(cols[3:])]
+
+        doc_cell = (cols[0] or "").strip()
+
+        if i == 0:
+            out.append("\t".join(["No."] + cols))
+            continue
+
+        is_heading = doc_cell.startswith("===")
+        is_blank = doc_cell == ""
+
+        if is_heading or is_blank:
+            out.append("\t".join([""] + cols))
+        else:
+            counter += 1
+            out.append("\t".join([str(counter)] + cols))
+
+    return "\n".join(out).strip()
+
+
 def strip_authority_column(tsv_text: str) -> str:
     """
-    Convert 4-column TSV into 3-column TSV by removing Column D.
-    Keeps section rows intact.
+    Convert TSV into client 3-column version by removing Rule Authority.
+
+    Handles BOTH:
+    - 4-col input: Document | Evidential | Client Notes | Rule Authority
+    - 5-col input (numbered): No. | Document | Evidential | Client Notes | Rule Authority
     """
     out_lines = []
     for i, line in enumerate(tsv_text.splitlines()):
         cols = line.split("\t")
-        if len(cols) < 4:
-            cols = cols + [""] * (4 - len(cols))
-        cols3 = cols[:3]
-        if i == 0:
-            cols3 = ["Document", "Evidential Requirements", "Client Notes"]
-        out_lines.append("\t".join(c.strip() for c in cols3))
+
+        numbered = (i == 0 and len(cols) >= 1 and cols[0].strip().lower() in ("no.", "no", "#"))
+
+        if numbered:
+            if len(cols) < 5:
+                cols = cols + [""] * (5 - len(cols))
+            cols4 = cols[:4]  # No. + first 3 content cols
+            if i == 0:
+                cols4 = ["No.", "Document", "Evidential Requirements", "Client Notes"]
+            out_lines.append("\t".join(c.strip() for c in cols4))
+        else:
+            if len(cols) < 4:
+                cols = cols + [""] * (4 - len(cols))
+            cols3 = cols[:3]
+            if i == 0:
+                cols3 = ["Document", "Evidential Requirements", "Client Notes"]
+            out_lines.append("\t".join(c.strip() for c in cols3))
+
     return "\n".join(out_lines).strip()
 
 
@@ -541,7 +599,7 @@ def dataframe_to_formatted_xlsx_bytes(df: pd.DataFrame, sheet_name="Status Sheet
     for col_idx, col_name in enumerate(df.columns, start=1):
         values = [str(col_name)] + [str(v) for v in df.iloc[:, col_idx - 1].values]
         max_len = max(len(v) for v in values)
-        width = min(max(max_len * 0.9, 18), 60)
+        width = min(max(max_len * 0.9, 10), 60)
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
     buffer = io.BytesIO()
@@ -725,7 +783,7 @@ st.markdown(
 st.markdown(
     "Provide the immigration route and the case facts in separate fields. "
     "The app will generate a rule-based document status sheet "
-    "in 4 columns suitable for Google Sheets, with client-ready notes and rule authority."
+    "in 5 columns suitable for Google Sheets, including numbering, client-ready notes, and rule authority."
 )
 
 uploaded_doc = st.file_uploader(
@@ -775,13 +833,15 @@ if submit and (route.strip() or facts.strip()):
         )
 
         reply = sanitize_for_sheets(reply)
+        reply = add_numbering_column(reply)
+
         st.session_state["internal_tsv"] = reply
         st.session_state.pop("client_tsv", None)  # reset client version on new run
 
         st.success("Status sheet generated.")
 
         st.subheader("Status Sheet Output")
-        tab_internal, tab_client = st.tabs(["Internal review (4 columns)", "Client version (3 columns)"])
+        tab_internal, tab_client = st.tabs(["Internal review (5 columns)", "Client version (4 columns)"])
 
         with tab_internal:
             st.write("Includes Rule Authority column for lawyer review.")
@@ -803,7 +863,7 @@ if submit and (route.strip() or facts.strip()):
                     st.warning(f"Formatted Excel export unavailable: {e}")
 
         with tab_client:
-            st.write("Click to generate a client-ready 3-column TSV (no authority column).")
+            st.write("Click to generate a client-ready version (no authority column).")
             make_client = st.button("Generate client version (strip Rule Authority)")
 
             if make_client:
