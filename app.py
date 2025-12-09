@@ -955,7 +955,6 @@ st.markdown(
 
 st.info(
     "Please download as Excel. You can then copy/paste into Google Sheets. "
-    "Excel downloads preserve Section colours and formatting."
 )
 
 uploaded_doc = st.file_uploader(
@@ -975,16 +974,16 @@ with st.form("checklist_form"):
     route = st.text_area(
         "Immigration Route",
         height=140,
-        placeholder="Example:\nSpouse visa extension under Appendix FM."
+        placeholder="Example:\nProvide the type of application, applying inside/outside UK, under which Appendix of the Rules."
     )
     facts = st.text_area(
         "Relevant Facts",
         height=260,
         placeholder=(
             "Example:\n"
-            "Sponsor is British citizen. Applicant is Swiss, applying from London. "
-            "Relationship married 3 years, cohabiting. Salaried income £35,000. "
-            "One child British. Need a rule-based document status sheet."
+            "Provide the key case facts needed to generate the DSS. "
+            "Include, where relevant: applicant nationality and current location (inside/outside the UK), current immigration status/visa history, the exact application type (e.g. visitor, work, study, family, settlement, citizenship; entry clearance/extension/ILR/switch), any dependants, finances/funding (salary, self-employment, savings, sponsor support, maintenance), accommodation or course/employment details if applicable, English language position or exemptions, and any risks/complications (previous refusals, overstays, criminality, medical/TB issues, missing documents, urgent deadlines). "
+            "Plain English is fine."
         )
     )
     submit = st.form_submit_button("Generate DSS")
