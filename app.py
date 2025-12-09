@@ -466,8 +466,8 @@ def add_numbering_column(tsv_text: str) -> str:
 
     Rules:
     - Header row becomes: No. | Document | Evidential Requirements | Client Notes | Rule Authority
-    - ANY heading/section row (if ANY cell starts with "===") is NOT numbered.
-      This catches headings even if they shift columns.
+    - ANY heading/section row (if ANY cell, after stripping a leading apostrophe, starts with "===")
+      is NOT numbered. This catches headings even after sanitize_for_sheets().
     - Blank rows are not numbered.
     - Only true document rows get consecutive numbers.
     """
@@ -494,15 +494,18 @@ def add_numbering_column(tsv_text: str) -> str:
             out.append("\t".join(["No."] + stripped_cols))
             continue
 
-        # Heading row if ANY cell starts with ===
-        is_heading = any(c.startswith("===") for c in stripped_cols if c)
+        # Normalize cells for heading detection:
+        # - remove whitespace
+        # - remove the leading apostrophe added by sanitize_for_sheets
+        normalized = [c.lstrip("'").strip() for c in stripped_cols if c]
 
-        # First non-empty cell for blank-row detection
-        first_non_empty = next((c for c in stripped_cols if c), "")
-        is_blank_row = first_non_empty == ""
+        is_heading = any(c.startswith("===") for c in normalized)
 
-        doc_cell = stripped_cols[0]  # "Document" column from model output
-        is_true_document_row = (doc_cell != "") and (not is_heading)
+        first_non_empty_norm = normalized[0] if normalized else ""
+        is_blank_row = first_non_empty_norm == ""
+
+        doc_cell_norm = stripped_cols[0].lstrip("'").strip()
+        is_true_document_row = (doc_cell_norm != "") and (not is_heading)
 
         if is_blank_row or is_heading or not is_true_document_row:
             out.append("\t".join([""] + stripped_cols))
