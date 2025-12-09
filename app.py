@@ -707,6 +707,10 @@ def dataframe_to_formatted_xlsx_bytes(df: pd.DataFrame, sheet_name="Status Sheet
     - section rows: brand blue #009fdf, white bold text, merged across row, left aligned
     - Ready To Review: checkbox markers already present
     - Status: Excel dropdown list for document rows
+
+    AMENDMENT:
+    - Header row font size = 14
+    - Section heading rows font size = 14
     """
     try:
         from openpyxl import Workbook
@@ -734,14 +738,16 @@ def dataframe_to_formatted_xlsx_bytes(df: pd.DataFrame, sheet_name="Status Sheet
         start_color="FF009FDF",
         end_color="FF009FDF"
     )
-    section_font = Font(bold=True, color="FFFFFF")
+    # ✅ Section heading font size 14
+    section_font = Font(bold=True, color="FFFFFF", size=14)
     section_alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
     # Header
     ws.append(list(df.columns))
     for col_idx in range(1, len(df.columns) + 1):
         cell = ws.cell(row=1, column=col_idx)
-        cell.font = Font(bold=True)
+        # ✅ Header font size 14
+        cell.font = Font(bold=True, size=14)
         cell.alignment = header_alignment
         cell.border = border
 
