@@ -972,7 +972,7 @@ with st.form("checklist_form"):
             "One child British. Need a rule-based document status sheet."
         )
     )
-    submit = st.form_submit_button("Generate Status Sheet")
+    submit = st.form_submit_button("Generate DSS")
 
 
 if submit and (route.strip() or facts.strip()):
