@@ -981,8 +981,8 @@ with st.form("checklist_form"):
         height=260,
         placeholder=(
             "Provide the key case facts needed to generate the DSS. "
-            "Include, where relevant: applicant nationality and current location (inside/outside the UK), current immigration status/visa history, the exact application type (e.g. visitor, work, study, family, settlement, citizenship; entry clearance/extension/ILR/switch), any dependants, finances/funding (salary, self-employment, savings, sponsor support, maintenance), accommodation or course/employment details if applicable, English language position or exemptions, and any risks/complications (previous refusals, overstays, criminality, medical/TB issues, missing documents, urgent deadlines). "
-            "Plain English is fine."
+            "For example, include, as relevant: applicant / sponsor's nationality and current location (inside/outside the UK), current immigration status/visa history, the exact application type (e.g. immigration route and entry clearance/extension/ILR/switch), any dependants, finances/funding (salary, self-employment, savings, sponsor support, maintenance), accommodation or course/employment details if applicable, English language position or exemptions, and any risks/complications (previous refusals, overstays, criminality, medical/TB issues, missing documents, urgent deadlines). "
+            "Plain English is fine, but detail in = detail out."
         )
     )
     submit = st.form_submit_button("Generate DSS")
