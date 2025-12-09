@@ -466,9 +466,10 @@ def add_numbering_column(tsv_text: str) -> str:
 
     Rules:
     - Header row becomes: No. | Document | Evidential Requirements | Client Notes | Rule Authority
-    - Section/heading rows (Document cell starts with "===") are NOT numbered.
+    - Any heading/section row (first non-empty cell starts with "===") is NOT numbered,
+      even if the heading got shifted into a later column.
     - Blank rows are not numbered.
-    - Only real document rows get consecutive numbers.
+    - Only true document rows get consecutive numbers.
     """
     lines = tsv_text.splitlines()
     if not lines:
@@ -486,20 +487,29 @@ def add_numbering_column(tsv_text: str) -> str:
         elif len(cols) > 4:
             cols = cols[:3] + [" ".join(cols[3:])]
 
-        doc_cell = (cols[0] or "").strip()
-
+        # Header row
         if i == 0:
-            out.append("\t".join(["No."] + cols))
+            out.append("\t".join(["No."] + [c.strip() for c in cols]))
             continue
 
-        is_heading = doc_cell.startswith("===")
-        is_blank = doc_cell == ""
+        stripped_cols = [c.strip() for c in cols]
+        doc_cell = stripped_cols[0]
 
-        if is_heading or is_blank:
-            out.append("\t".join([""] + cols))
+        # Find the first non-empty cell anywhere in the row
+        first_non_empty = next((c for c in stripped_cols if c), "")
+
+        is_heading = first_non_empty.startswith("===")
+        is_blank_row = first_non_empty == ""
+
+        # A "true" document row must have something in the Document column.
+        # (If heading text got shifted right, doc_cell will be empty.)
+        is_true_document_row = (doc_cell != "") and (not is_heading)
+
+        if is_blank_row or is_heading or not is_true_document_row:
+            out.append("\t".join([""] + stripped_cols))
         else:
             counter += 1
-            out.append("\t".join([str(counter)] + cols))
+            out.append("\t".join([str(counter)] + stripped_cols))
 
     return "\n".join(out).strip()
 
