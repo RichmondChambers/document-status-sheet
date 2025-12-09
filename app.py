@@ -397,6 +397,19 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
 # =========================
 # 9. Streamlit UI
 # =========================
+def render_logo():
+    st.markdown(
+        """
+        <div style="text-align: center; padding-bottom: 10px;">
+            <img src="https://raw.githubusercontent.com/RichmondChambers/richmond-document-status-sheet/main/logo.png" width="150">
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+render_logo()
+
 st.markdown(
     "<h1 style='text-align: center; font-size: 2.6rem;'>Document Status Sheet Generator</h1>",
     unsafe_allow_html=True
