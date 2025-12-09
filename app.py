@@ -974,13 +974,12 @@ with st.form("checklist_form"):
     route = st.text_area(
         "Immigration Route",
         height=140,
-        placeholder="Example:\nProvide the type of application, applying inside/outside UK, under which Appendix of the Rules."
+        placeholder="Provide the type of application, applying inside/outside UK, under which Appendix of the Rules."
     )
     facts = st.text_area(
         "Relevant Facts",
         height=260,
         placeholder=(
-            "Example:\n"
             "Provide the key case facts needed to generate the DSS. "
             "Include, where relevant: applicant nationality and current location (inside/outside the UK), current immigration status/visa history, the exact application type (e.g. visitor, work, study, family, settlement, citizenship; entry clearance/extension/ILR/switch), any dependants, finances/funding (salary, self-employment, savings, sponsor support, maintenance), accommodation or course/employment details if applicable, English language position or exemptions, and any risks/complications (previous refusals, overstays, criminality, medical/TB issues, missing documents, urgent deadlines). "
             "Plain English is fine."
