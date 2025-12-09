@@ -12,6 +12,7 @@ from pathlib import Path
 import base64
 import pandas as pd
 import io
+import string
 
 from index_builder import sync_drive_and_rebuild_index_if_needed, INDEX_FILE, METADATA_FILE
 
@@ -233,14 +234,15 @@ Output rules (SPREADSHEET-READY TSV, CLIENT + LAWYER REVIEW):
   Column A: Document
   Column B: Evidential Requirements (what must be shown)
   Column C: Client Notes (clear, client-ready explanation; no legalese)
-  Column D: GDrive Link (leave blank unless user provides/can be inferred)
+  Column D: GDrive Link (leave blank)
   Column E: Ready To Review (leave blank; app will insert checkboxes)
   Column F: Rule Authority (pinpoint paragraph reference + a SHORT supporting quotation)
 - First row MUST be the header exactly:
   Document<TAB>Evidential Requirements<TAB>Client Notes<TAB>GDrive Link<TAB>Ready To Review<TAB>Rule Authority
 - Do NOT include any extra text before or after the TSV.
 - Put section titles as a standalone row in Column A only, like:
-  === Section: Financial Requirement ===<TAB><TAB><TAB><TAB><TAB>
+  Section: Financial Requirement<TAB><TAB><TAB><TAB><TAB>
+  (Do NOT include any === symbols.)
 - NEVER start any cell with "=", "+", "-", or "@". If unavoidable, prefix that cell with "'".
 - Client Notes must be concise, readable, and suitable to send to a client.
 - Rule Authority must include:
@@ -249,7 +251,7 @@ Output rules (SPREADSHEET-READY TSV, CLIENT + LAWYER REVIEW):
 - If a filter is requested:
   * output ONLY that subset;
   * begin with a section row:
-    === Filtered Checklist: {filter_label} ===<TAB><TAB><TAB><TAB><TAB>
+    Filtered Checklist: {filter_label}<TAB><TAB><TAB><TAB><TAB>
 - If you cannot find supporting rule text using lookup_rule, state that briefly in Rule Authority and keep the document as "Recommended (not mandatory)" where appropriate.
 
 Legal Authority Summary:
@@ -345,7 +347,6 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
         }
     ]
 
-    # ---- First call (allow tools) ----
     resp = client.responses.create(
         model="gpt-5.1",
         input=[
@@ -404,10 +405,6 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
 # 9. Streamlit UI helpers
 # =========================
 def render_logo():
-    """
-    Load logo.png from the repo root (same folder as this app.py),
-    embed as base64, and center it perfectly with HTML/CSS.
-    """
     logo_path = Path(__file__).parent / "logo.png"
     if logo_path.exists():
         b64 = base64.b64encode(logo_path.read_bytes()).decode()
@@ -426,14 +423,22 @@ def render_logo():
 def sanitize_for_sheets(tsv_text: str) -> str:
     """
     Safety net to:
-    - strip any stray markdown pipes
-    - prevent Sheets formula parsing
-    - force exactly 6 columns per row (pad/merge)
+    - strip markdown pipes
+    - prevent Sheets formulas
+    - force exactly 6 columns per row
+    - if model inserted stray tabs in Client Notes, merge overflow back into Client Notes
     """
     lines = []
     for line in tsv_text.splitlines():
         line = line.replace("|", "")
         cols = line.split("\t")
+
+        if len(cols) > 6:
+            head = cols[:2]
+            tail = cols[-3:]
+            notes_overflow = cols[2:-3]
+            merged_notes = " ".join(c.strip() for c in notes_overflow if c.strip())
+            cols = head + [merged_notes] + tail
 
         if len(cols) < 6:
             cols = cols + [""] * (6 - len(cols))
@@ -452,15 +457,92 @@ def sanitize_for_sheets(tsv_text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def is_section_heading_row(cells: list[str]) -> bool:
+    normalized = [c.lstrip("'").strip() for c in cells if c.strip()]
+    if not normalized:
+        return False
+    first = normalized[0]
+    return (
+        first.startswith("Section")
+        or first.startswith("Filtered Checklist")
+        or first.startswith("===")
+        or first.startswith("Section:")
+    )
+
+
+def reletter_section_headings(tsv_text: str) -> str:
+    """
+    Rewrite section heading rows to:
+      Section A: Title
+      Section B: Title
+      ...
+    Removes any ===. Leaves Filtered Checklist row unlettered.
+    """
+    lines = tsv_text.splitlines()
+    if not lines:
+        return tsv_text
+
+    out = []
+    letter_idx = 0
+    letters = list(string.ascii_uppercase)
+
+    for i, line in enumerate(lines):
+        cols = line.split("\t")
+        if len(cols) < 6:
+            cols = cols + [""] * (6 - len(cols))
+        elif len(cols) > 6:
+            cols = cols[:5] + [" ".join(cols[5:])]
+
+        if i == 0:
+            out.append("\t".join(cols))
+            continue
+
+        doc_cell = cols[0].lstrip("'").strip()
+
+        if doc_cell.lower().startswith("filtered checklist"):
+            cleaned = re.sub(r"^=+\s*", "", doc_cell).strip()
+            cols[0] = cleaned
+            cols[1:] = [""] * 5
+            out.append("\t".join(cols))
+            continue
+
+        if is_section_heading_row([doc_cell]):
+            cleaned = doc_cell.replace("===", "").strip()
+            cleaned = re.sub(r"^Section\s*:?\s*", "", cleaned, flags=re.IGNORECASE).strip()
+            cleaned = re.sub(r"^Section\s+[A-Z]\s*:?\s*", "", cleaned, flags=re.IGNORECASE).strip()
+
+            letter = letters[letter_idx] if letter_idx < len(letters) else f"({letter_idx+1})"
+            letter_idx += 1
+
+            cols[0] = f"Section {letter}: {cleaned}"
+            cols[1:] = [""] * 5
+            out.append("\t".join(cols))
+            continue
+
+        out.append("\t".join(cols))
+
+    return "\n".join(out).strip()
+
+
+def remove_blank_rows(tsv_text: str) -> str:
+    """
+    Remove truly blank rows (all cells empty after trimming).
+    Keeps header and section rows.
+    """
+    out = []
+    for i, line in enumerate(tsv_text.splitlines()):
+        cols = [c.strip() for c in line.split("\t")]
+        if i == 0:
+            out.append(line)
+            continue
+        if any(c for c in cols):
+            out.append(line)
+    return "\n".join(out).strip()
+
+
 def add_numbering_column(tsv_text: str) -> str:
     """
-    Add a leftmost numbering column ("No.").
-
-    Input: 6-col TSV
-      Document | Evidential | Client Notes | GDrive Link | Ready To Review | Rule Authority
-
-    Output: 7-col TSV
-      No. | Document | Evidential | Client Notes | GDrive Link | Ready To Review | Rule Authority
+    Add leftmost numbering column ("No.") so only document rows are numbered.
     """
     lines = tsv_text.splitlines()
     if not lines:
@@ -471,7 +553,6 @@ def add_numbering_column(tsv_text: str) -> str:
 
     for i, line in enumerate(lines):
         cols = line.split("\t")
-
         if len(cols) < 6:
             cols = cols + [""] * (6 - len(cols))
         elif len(cols) > 6:
@@ -483,13 +564,10 @@ def add_numbering_column(tsv_text: str) -> str:
             out.append("\t".join(["No."] + stripped_cols))
             continue
 
-        normalized = [c.lstrip("'").strip() for c in stripped_cols if c]
-        is_heading = any(c.startswith("===") for c in normalized)
-
-        first_non_empty_norm = normalized[0] if normalized else ""
-        is_blank_row = first_non_empty_norm == ""
-
         doc_cell_norm = stripped_cols[0].lstrip("'").strip()
+        is_heading = is_section_heading_row([doc_cell_norm])
+        is_blank_row = doc_cell_norm == ""
+
         is_true_document_row = (doc_cell_norm != "") and (not is_heading)
 
         if is_blank_row or is_heading or not is_true_document_row:
@@ -503,14 +581,7 @@ def add_numbering_column(tsv_text: str) -> str:
 
 def add_ready_checkboxes(tsv_text: str) -> str:
     """
-    Insert a checkbox marker "☐" into Ready To Review column
-    for document rows only.
-
-    Handles:
-    - 7-col numbered TSV (internal): No. | Document | Evidential | Client | GDrive | Ready | Authority
-    - 5-col unnumbered TSV (client): Document | Evidential | Client | GDrive | Ready
-
-    For heading/blank rows: Ready cell stays blank.
+    Insert a checkbox marker "☐" into Ready To Review column for document rows only.
     """
     lines = tsv_text.splitlines()
     if not lines:
@@ -534,10 +605,10 @@ def add_ready_checkboxes(tsv_text: str) -> str:
             doc_idx = 1
             no_idx = 0
         else:
-            if len(cols) < 5:
-                cols = cols + [""] * (5 - len(cols))
-            elif len(cols) > 5:
-                cols = cols[:4] + [" ".join(cols[4:])]
+            if len(cols) < 6:
+                cols = cols + [""] * (6 - len(cols))
+            elif len(cols) > 6:
+                cols = cols[:5] + [" ".join(cols[5:])]
             ready_idx = 4
             doc_idx = 0
             no_idx = None
@@ -548,11 +619,10 @@ def add_ready_checkboxes(tsv_text: str) -> str:
             out.append("\t".join(stripped_cols))
             continue
 
-        normalized = [c.lstrip("'").strip() for c in stripped_cols if c]
-        is_heading = any(c.startswith("===") for c in normalized)
-        is_blank_row = (len(normalized) == 0)
-
         doc_cell = stripped_cols[doc_idx].lstrip("'").strip()
+        is_heading = is_section_heading_row([doc_cell])
+        is_blank_row = doc_cell == ""
+
         is_document_row = (doc_cell != "") and (not is_heading) and (not is_blank_row)
 
         if is_document_row:
@@ -571,14 +641,8 @@ def add_ready_checkboxes(tsv_text: str) -> str:
 
 def strip_authority_column(tsv_text: str) -> str:
     """
-    Convert INTERNAL TSV into CLIENT TSV by removing Rule Authority only,
-    while keeping GDrive Link + Ready To Review.
-
-    Input internal (7 cols):
-      No. | Document | Evidential | Client Notes | GDrive Link | Ready To Review | Rule Authority
-
-    Output client (5 cols):
-      Document | Evidential | Client Notes | GDrive Link | Ready To Review
+    Convert INTERNAL TSV (7 cols) into CLIENT TSV (5 cols) by removing Rule Authority only.
+    Keeps GDrive Link + Ready To Review.
     """
     out_lines = []
     lines = tsv_text.splitlines()
@@ -587,7 +651,6 @@ def strip_authority_column(tsv_text: str) -> str:
 
     for i, line in enumerate(lines):
         cols = line.split("\t")
-
         if len(cols) < 7:
             cols = cols + [""] * (7 - len(cols))
         elif len(cols) > 7:
@@ -610,9 +673,18 @@ def tsv_to_dataframe(tsv_text: str) -> pd.DataFrame:
 
 
 def dataframe_to_formatted_xlsx_bytes(df: pd.DataFrame, sheet_name="Status Sheet") -> bytes:
+    """
+    Export DataFrame to formatted Excel (openpyxl):
+    - wrap text
+    - centre align
+    - bold header
+    - freeze row 1
+    - borders
+    - bold + RC brand fill for Section rows
+    """
     try:
         from openpyxl import Workbook
-        from openpyxl.styles import Alignment, Font, Border, Side
+        from openpyxl.styles import Alignment, Font, Border, Side, PatternFill
         from openpyxl.utils import get_column_letter
     except ImportError:
         raise ImportError(
@@ -630,6 +702,10 @@ def dataframe_to_formatted_xlsx_bytes(df: pd.DataFrame, sheet_name="Status Sheet
     header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     cell_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
+    section_fill = PatternFill("solid", fgColor="009FDF")
+    section_font = Font(bold=True, color="FFFFFF")
+
+    # Header
     ws.append(list(df.columns))
     for col_idx in range(1, len(df.columns) + 1):
         cell = ws.cell(row=1, column=col_idx)
@@ -637,16 +713,29 @@ def dataframe_to_formatted_xlsx_bytes(df: pd.DataFrame, sheet_name="Status Sheet
         cell.alignment = header_alignment
         cell.border = border
 
+    # Body
+    numbered = (len(df.columns) > 0 and str(df.columns[0]).strip().lower() in ("no.", "no", "#"))
     for row_vals in df.itertuples(index=False):
         ws.append(list(row_vals))
 
-    for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
-        for cell in row:
+    # Style rows
+    for r_idx in range(2, ws.max_row + 1):
+        section_cell_idx = 2 if numbered else 1  # B if numbered, A if not
+        section_text = str(ws.cell(row=r_idx, column=section_cell_idx).value or "").strip()
+        is_section = section_text.startswith("Section ") or section_text.startswith("Filtered Checklist")
+
+        for c_idx in range(1, ws.max_column + 1):
+            cell = ws.cell(row=r_idx, column=c_idx)
             cell.alignment = cell_alignment
             cell.border = border
 
+            if is_section:
+                cell.font = section_font
+                cell.fill = section_fill
+
     ws.freeze_panes = "A2"
 
+    # Column widths
     for col_idx, col_name in enumerate(df.columns, start=1):
         values = [str(col_name)] + [str(v) for v in df.iloc[:, col_idx - 1].values]
         max_len = max(len(v) for v in values)
@@ -660,7 +749,7 @@ def dataframe_to_formatted_xlsx_bytes(df: pd.DataFrame, sheet_name="Status Sheet
 
 
 # =========================
-# Filter options
+# Filter options (label -> precise model instruction)
 # =========================
 FILTER_OPTIONS = {
     "Full checklist": None,
@@ -811,13 +900,12 @@ st.markdown(
 st.markdown(
     "Provide the immigration route and the case facts in separate fields. "
     "The app will generate a rule-based document status sheet "
-    "in 7 columns for internal review (including numbering, GDrive Link, Ready To Review markers, and rule authority) "
-    "and a 5-column client version."
+    "in 7 columns for internal review and a 5-column client version."
 )
 
 st.info(
-    "After pasting into Google Sheets, run your shared 'Status Sheet → Format + Checkboxes' Apps Script "
-    "to convert the ☒/☐ markers into TRUE Google Sheets checkboxes."
+    "To preserve bold/coloured Section headings in Google Sheets, "
+    "download the formatted Excel file, open it in Excel, and copy/paste into Sheets."
 )
 
 uploaded_doc = st.file_uploader(
@@ -866,25 +954,22 @@ if submit and (route.strip() or facts.strip()):
             filter_label=filter_label
         )
 
-        # 6-col base cleanup
         reply = sanitize_for_sheets(reply)
-
-        # Add No. (7 cols)
+        reply = reletter_section_headings(reply)
+        reply = remove_blank_rows(reply)     # <-- removes spacer rows
         reply = add_numbering_column(reply)
-
-        # Add checkbox markers into Ready column (7 cols)
         reply = add_ready_checkboxes(reply)
 
         st.session_state["internal_tsv"] = reply
-        st.session_state.pop("client_tsv", None)  # reset client on new run
+        st.session_state.pop("client_tsv", None)
 
         st.success("Status sheet generated.")
-
         st.subheader("Status Sheet Output")
+
         tab_internal, tab_client = st.tabs(["Internal review (7 columns)", "Client version (5 columns)"])
 
         with tab_internal:
-            st.write("Includes Rule Authority, numbering, GDrive Link, and Ready To Review markers.")
+            st.write("Includes Rule Authority, Section lettering, numbering, GDrive Link, and Ready To Review markers.")
             internal_tsv = st.session_state.get("internal_tsv", reply)
             st.code(internal_tsv, language="text")
 
@@ -908,7 +993,6 @@ if submit and (route.strip() or facts.strip()):
             if make_client:
                 internal_tsv = st.session_state.get("internal_tsv", "")
                 client_tsv = strip_authority_column(internal_tsv) if internal_tsv else ""
-                # Ensure Ready markers persist for client TSV too
                 client_tsv = add_ready_checkboxes(client_tsv)
                 st.session_state["client_tsv"] = client_tsv
 
@@ -951,7 +1035,7 @@ if submit and (route.strip() or facts.strip()):
             unsafe_allow_html=False,
         )
 
-        # Copy button (copies internal TSV by default)
+        # Copy button (copies internal TSV)
         components.html(
             f"""
             <style>
