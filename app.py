@@ -6,7 +6,6 @@ import re
 import json
 import requests
 import jwt  # PyJWT
-import streamlit.components.v1 as components
 from openai import OpenAI
 from pathlib import Path
 import base64
@@ -643,38 +642,52 @@ def add_ready_checkboxes(tsv_text: str) -> str:
     return "\n".join(out).strip()
 
 
-def strip_authority_column(tsv_text: str) -> str:
+def move_col_g_to_h(tsv_text: str) -> str:
     """
-    Convert INTERNAL TSV (8 cols) into CLIENT TSV (6 cols) by removing
-    No. and Rule Authority only. Keeps GDrive, Ready, Status.
+    For 8-column TSVs (numbered view):
+      - leave header row unchanged
+      - leave section/filtered-heading rows unchanged
+      - move any text in column G (index 6) to column H (index 7)
+        and blank column G
     """
-    out_lines = []
     lines = tsv_text.splitlines()
     if not lines:
         return tsv_text
 
+    out = []
     for i, line in enumerate(lines):
         cols = line.split("\t")
+
+        # Header row stays as-is
+        if i == 0:
+            out.append(line)
+            continue
+
+        # Ensure 8 columns
         if len(cols) < 8:
             cols = cols + [""] * (8 - len(cols))
         elif len(cols) > 8:
             cols = cols[:7] + [" ".join(cols[7:])]
 
-        client_cols = cols[1:7]  # drop No. (0) and Authority (7)
+        # After numbering, headings sit in col A (No.)
+        heading_cell = cols[0].lstrip("'").strip()
+        is_heading = is_section_heading_row([heading_cell])
 
-        if i == 0:
-            client_cols = [
-                "Document",
-                "Evidential Requirements",
-                "Client Notes",
-                "GDrive Link",
-                "Ready To Review",
-                "Status",
-            ]
+        if is_heading:
+            out.append("\t".join(cols))
+            continue
 
-        out_lines.append("\t".join(c.strip() for c in client_cols))
+        g_idx, h_idx = 6, 7
+        g_val = cols[g_idx].strip()
+        h_val = cols[h_idx].strip()
 
-    return "\n".join(out_lines).strip()
+        if g_val:
+            cols[h_idx] = (h_val + " " + g_val).strip() if h_val else g_val
+            cols[g_idx] = ""
+
+        out.append("\t".join(cols))
+
+    return "\n".join(out).strip()
 
 
 def tsv_to_dataframe(tsv_text: str) -> pd.DataFrame:
@@ -716,7 +729,6 @@ def dataframe_to_formatted_xlsx_bytes(df: pd.DataFrame, sheet_name="Status Sheet
     header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     cell_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-    # Brand colour fill — Excel shows correct; Sheets clipboard may still tint
     section_fill = PatternFill(
         fill_type="solid",
         start_color="FF009FDF",
@@ -725,7 +737,7 @@ def dataframe_to_formatted_xlsx_bytes(df: pd.DataFrame, sheet_name="Status Sheet
     section_font = Font(bold=True, color="FFFFFF")
     section_alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
-    # Header row
+    # Header
     ws.append(list(df.columns))
     for col_idx in range(1, len(df.columns) + 1):
         cell = ws.cell(row=1, column=col_idx)
@@ -744,7 +756,7 @@ def dataframe_to_formatted_xlsx_bytes(df: pd.DataFrame, sheet_name="Status Sheet
             status_col_idx = j
             break
 
-    # Set up dropdown for Status (Excel)
+    # Dropdown for Status (Excel)
     status_options = [
         "Pending",
         "Approved",
@@ -783,9 +795,7 @@ def dataframe_to_formatted_xlsx_bytes(df: pd.DataFrame, sheet_name="Status Sheet
             )
             ws.cell(row=r_idx, column=1).alignment = section_alignment
         else:
-            # Apply dropdown to Status only if doc row
             if status_col_idx is not None:
-                # doc col depends on whether "No." exists
                 first_header = str(ws.cell(row=1, column=1).value or "").strip().lower()
                 is_numbered = first_header in ("no.", "no", "#")
                 doc_col_idx = 2 if is_numbered else 1
@@ -938,9 +948,8 @@ st.markdown(
 )
 
 st.info(
-    "Excel downloads preserve Section colours and formatting. "
-    "Google Sheets may tint colours when you copy/paste from Excel; "
-    "use the team Apps Script to re-apply brand styling."
+    "Please download as Excel. You can then copy/paste into Google Sheets. "
+    "Excel downloads preserve Section colours and formatting."
 )
 
 uploaded_doc = st.file_uploader(
@@ -995,66 +1004,28 @@ if submit and (route.strip() or facts.strip()):
         reply = add_numbering_column(reply)
         reply = add_ready_checkboxes(reply)
 
-        st.session_state["internal_tsv"] = reply
-        st.session_state.pop("client_tsv", None)
+        # ✅ Amendment: move Column G content to Column H (except headings)
+        reply = move_col_g_to_h(reply)
+
+        st.session_state["tsv"] = reply
 
         st.success("Status sheet generated.")
-        st.subheader("Status Sheet Output")
+        st.subheader("Status Sheet Preview (TSV)")
 
-        tab_internal, tab_client = st.tabs(["Internal review (8 columns)", "Client version (6 columns)"])
+        st.code(reply, language="text")
 
-        with tab_internal:
-            st.write("Includes Rule Authority for lawyer review.")
-            internal_tsv = st.session_state.get("internal_tsv", reply)
-            st.code(internal_tsv, language="text")
-
-            internal_df = tsv_to_dataframe(internal_tsv)
-            if not internal_df.empty:
-                try:
-                    internal_xlsx = dataframe_to_formatted_xlsx_bytes(internal_df, sheet_name="Internal Review")
-                    st.download_button(
-                        "Download INTERNAL formatted Excel (.xlsx)",
-                        data=internal_xlsx,
-                        file_name="document_status_sheet_internal.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-                except Exception as e:
-                    st.warning(f"Formatted Excel export unavailable: {e}")
-
-        with tab_client:
-            st.write("Click to generate a client-ready version (no Rule Authority column).")
-            make_client = st.button("Generate client version (strip Rule Authority)")
-
-            if make_client:
-                internal_tsv = st.session_state.get("internal_tsv", "")
-                client_tsv = strip_authority_column(internal_tsv) if internal_tsv else ""
-                client_tsv = add_ready_checkboxes(client_tsv)
-                st.session_state["client_tsv"] = client_tsv
-
-            client_tsv = st.session_state.get("client_tsv", "")
-            if client_tsv:
-                st.code(client_tsv, language="text")
+        df = tsv_to_dataframe(reply)
+        if not df.empty:
+            try:
+                xlsx_bytes = dataframe_to_formatted_xlsx_bytes(df, sheet_name="Status Sheet")
                 st.download_button(
-                    "Download client TSV",
-                    data=client_tsv,
-                    file_name="document_status_sheet_client.tsv",
-                    mime="text/tab-separated-values"
+                    "Download formatted Excel (.xlsx)",
+                    data=xlsx_bytes,
+                    file_name="document_status_sheet.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-
-                client_df = tsv_to_dataframe(client_tsv)
-                if not client_df.empty:
-                    try:
-                        client_xlsx = dataframe_to_formatted_xlsx_bytes(client_df, sheet_name="Client Version")
-                        st.download_button(
-                            "Download CLIENT formatted Excel (.xlsx)",
-                            data=client_xlsx,
-                            file_name="document_status_sheet_client.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
-                    except Exception as e:
-                        st.warning(f"Formatted Excel export unavailable: {e}")
-            else:
-                st.info("Client version will appear here after you click the button.")
+            except Exception as e:
+                st.warning(f"Formatted Excel export unavailable: {e}")
 
         st.markdown(
             """
@@ -1068,38 +1039,5 @@ if submit and (route.strip() or facts.strip()):
             of care.
             """,
             unsafe_allow_html=False,
-        )
-
-        components.html(
-            f"""
-            <style>
-            .copy-button {{
-                margin-top: 10px;
-                padding: 8px 16px;
-                background-color: #2e2e2e;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                cursor: pointer;
-            }}
-            .copy-button:hover {{ background-color: #4a4a4a; }}
-            </style>
-
-            <button class="copy-button" onclick="copyToClipboard()">📋 Copy internal TSV to Clipboard</button>
-
-            <script>
-            async function copyToClipboard() {{
-                const plainText = `{reply.replace("`", "\\`")}`;
-                const blobText = new Blob([plainText], {{ type: 'text/plain' }});
-                const clipboardItem = new ClipboardItem({{
-                    'text/plain': blobText
-                }});
-                await navigator.clipboard.write([clipboardItem]);
-                alert("Copied! Paste into Google Sheets.");
-            }}
-            </script>
-            """,
-            height=110,
-            scrolling=False
         )
 
