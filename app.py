@@ -9,6 +9,7 @@ import jwt  # PyJWT
 import streamlit.components.v1 as components
 from markdown_it import MarkdownIt
 from openai import OpenAI
+from pathlib import Path
 
 from index_builder import sync_drive_and_rebuild_index_if_needed, INDEX_FILE, METADATA_FILE
 
@@ -398,14 +399,17 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
 # 9. Streamlit UI
 # =========================
 def render_logo():
-    st.markdown(
-        """
-        <div style="text-align: center; padding-bottom: 10px;">
-            <img src="https://raw.githubusercontent.com/RichmondChambers/richmond-document-status-sheet/main/logo.png" width="150">
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+    """
+    Load logo.png from the repo root (same folder as this app.py),
+    and render it at the top of the app.
+    """
+    logo_path = Path(__file__).parent / "logo.png"
+    if logo_path.exists():
+        cols = st.columns([1, 2, 1])
+        with cols[1]:
+            st.image(str(logo_path), width=150)
+    else:
+        st.warning(f"Logo not found at {logo_path}")
 
 
 render_logo()
