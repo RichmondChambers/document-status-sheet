@@ -944,7 +944,7 @@ st.markdown(
 
 st.markdown(
     "Provide the immigration route and relevant case facts in separate fields. "
-    "The app will generate a rules-based DSS. "
+    "The app will generate a DSS. "
 )
 
 st.info(
