@@ -229,16 +229,18 @@ Hard rules:
 
 Output rules (SPREADSHEET-READY TSV, CLIENT + LAWYER REVIEW):
 - You MUST output ONLY tab-separated values (TSV). No Markdown, no bullets, no numbering, no pipes "|".
-- Produce EXACTLY 4 columns per row:
+- Produce EXACTLY 6 columns per row:
   Column A: Document
   Column B: Evidential Requirements (what must be shown)
   Column C: Client Notes (clear, client-ready explanation; no legalese)
-  Column D: Rule Authority (pinpoint paragraph reference + a SHORT supporting quotation)
+  Column D: GDrive Link (leave blank unless user provides/can be inferred)
+  Column E: Ready To Review (leave blank; app will insert checkboxes)
+  Column F: Rule Authority (pinpoint paragraph reference + a SHORT supporting quotation)
 - First row MUST be the header exactly:
-  Document<TAB>Evidential Requirements<TAB>Client Notes<TAB>Rule Authority
+  Document<TAB>Evidential Requirements<TAB>Client Notes<TAB>GDrive Link<TAB>Ready To Review<TAB>Rule Authority
 - Do NOT include any extra text before or after the TSV.
 - Put section titles as a standalone row in Column A only, like:
-  === Section: Financial Requirement ===<TAB><TAB><TAB>
+  === Section: Financial Requirement ===<TAB><TAB><TAB><TAB><TAB>
 - NEVER start any cell with "=", "+", "-", or "@". If unavoidable, prefix that cell with "'".
 - Client Notes must be concise, readable, and suitable to send to a client.
 - Rule Authority must include:
@@ -247,16 +249,11 @@ Output rules (SPREADSHEET-READY TSV, CLIENT + LAWYER REVIEW):
 - If a filter is requested:
   * output ONLY that subset;
   * begin with a section row:
-    === Filtered Checklist: {filter_label} ===<TAB><TAB><TAB>
+    === Filtered Checklist: {filter_label} ===<TAB><TAB><TAB><TAB><TAB>
 - If you cannot find supporting rule text using lookup_rule, state that briefly in Rule Authority and keep the document as "Recommended (not mandatory)" where appropriate.
 
-Link Appendix references to GOV.UK unless user asks otherwise.
-
-Country-specificity:
-- If nationality or location is provided, add relevant country-specific evidence notes (TB test, approved English tests, apostille/translation norms), citing GOV.UK guidance.
-
 Legal Authority Summary:
-- Do NOT include a separate summary section. All authority must be in Column D only.
+- Do NOT include a separate summary section. All authority must be in Column F only.
 """
 
 
@@ -361,17 +358,14 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
         temperature=0.2,
     )
 
-    # Collect any tool calls
     pending_tool_calls = []
     for item in getattr(resp, "output", []) or []:
         if getattr(item, "type", None) in ("tool_call", "function_call") and getattr(item, "name", None) == "lookup_rule":
             pending_tool_calls.append(item)
 
-    # If no tools called, return text directly
     if not pending_tool_calls:
         return (getattr(resp, "output_text", "") or "").strip()
 
-    # ---- Resolve tools ourselves ----
     resolved_rules = []
     for tc in pending_tool_calls:
         raw_args = getattr(tc, "arguments", None) or "{}"
@@ -387,14 +381,12 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None, filt
         )
         resolved_rules.append(tool_result)
 
-    # Add resolved rule text into context
     resolved_context = grounding_context + "\n\nLOOKUP_RULE RESULTS (authoritative):\n"
     for i, tr in enumerate(resolved_rules):
         resolved_context += f"\n[LR{i+1}] {tr.get('appendix_or_part','')} {tr.get('paragraph_ref','')}\n"
         for p in tr.get("passages", []):
             resolved_context += f"- ({p.get('source','')} {p.get('paragraph_ref','')}) {p.get('text','')}\n"
 
-    # ---- Second full call (NO tools, NO resume) ----
     followup = client.responses.create(
         model="gpt-5.1",
         input=[
@@ -436,17 +428,17 @@ def sanitize_for_sheets(tsv_text: str) -> str:
     Safety net to:
     - strip any stray markdown pipes
     - prevent Sheets formula parsing
-    - force exactly 4 columns per row (pad/merge)
+    - force exactly 6 columns per row (pad/merge)
     """
     lines = []
     for line in tsv_text.splitlines():
         line = line.replace("|", "")
         cols = line.split("\t")
 
-        if len(cols) < 4:
-            cols = cols + [""] * (4 - len(cols))
-        elif len(cols) > 4:
-            cols = cols[:3] + [" ".join(cols[3:])]
+        if len(cols) < 6:
+            cols = cols + [""] * (6 - len(cols))
+        elif len(cols) > 6:
+            cols = cols[:5] + [" ".join(cols[5:])]
 
         safe_cols = []
         for c in cols:
@@ -464,12 +456,11 @@ def add_numbering_column(tsv_text: str) -> str:
     """
     Add a leftmost numbering column ("No.").
 
-    Rules:
-    - Header row becomes: No. | Document | Evidential Requirements | Client Notes | Rule Authority
-    - ANY heading/section row (if ANY cell, after stripping a leading apostrophe, starts with "===")
-      is NOT numbered. This catches headings even after sanitize_for_sheets().
-    - Blank rows are not numbered.
-    - Only true document rows get consecutive numbers.
+    Input: 6-col TSV
+      Document | Evidential | Client Notes | GDrive Link | Ready To Review | Rule Authority
+
+    Output: 7-col TSV
+      No. | Document | Evidential | Client Notes | GDrive Link | Ready To Review | Rule Authority
     """
     lines = tsv_text.splitlines()
     if not lines:
@@ -481,24 +472,18 @@ def add_numbering_column(tsv_text: str) -> str:
     for i, line in enumerate(lines):
         cols = line.split("\t")
 
-        # Ensure at least 4 cols before numbering
-        if len(cols) < 4:
-            cols = cols + [""] * (4 - len(cols))
-        elif len(cols) > 4:
-            cols = cols[:3] + [" ".join(cols[3:])]
+        if len(cols) < 6:
+            cols = cols + [""] * (6 - len(cols))
+        elif len(cols) > 6:
+            cols = cols[:5] + [" ".join(cols[5:])]
 
         stripped_cols = [c.strip() for c in cols]
 
-        # Header row
         if i == 0:
             out.append("\t".join(["No."] + stripped_cols))
             continue
 
-        # Normalize cells for heading detection:
-        # - remove whitespace
-        # - remove the leading apostrophe added by sanitize_for_sheets
         normalized = [c.lstrip("'").strip() for c in stripped_cols if c]
-
         is_heading = any(c.startswith("===") for c in normalized)
 
         first_non_empty_norm = normalized[0] if normalized else ""
@@ -516,57 +501,115 @@ def add_numbering_column(tsv_text: str) -> str:
     return "\n".join(out).strip()
 
 
-def strip_authority_column(tsv_text: str) -> str:
+def add_ready_checkboxes(tsv_text: str) -> str:
     """
-    Convert TSV into client 3-column version by removing Rule Authority.
+    Insert a checkbox marker "☐" into Ready To Review column
+    for document rows only.
 
-    Handles BOTH:
-    - 4-col input: Document | Evidential | Client Notes | Rule Authority
-    - 5-col input (numbered): No. | Document | Evidential | Client Notes | Rule Authority
+    Handles:
+    - 7-col numbered TSV (internal): No. | Document | Evidential | Client | GDrive | Ready | Authority
+    - 5-col unnumbered TSV (client): Document | Evidential | Client | GDrive | Ready
+
+    For heading/blank rows: Ready cell stays blank.
     """
-    out_lines = []
-    for i, line in enumerate(tsv_text.splitlines()):
+    lines = tsv_text.splitlines()
+    if not lines:
+        return tsv_text
+
+    out = []
+    is_numbered = False
+
+    for i, line in enumerate(lines):
         cols = line.split("\t")
 
-        numbered = (i == 0 and len(cols) >= 1 and cols[0].strip().lower() in ("no.", "no", "#"))
+        if i == 0:
+            is_numbered = cols[0].strip().lower() in ("no.", "no", "#")
 
-        if numbered:
+        if is_numbered:
+            if len(cols) < 7:
+                cols = cols + [""] * (7 - len(cols))
+            elif len(cols) > 7:
+                cols = cols[:6] + [" ".join(cols[6:])]
+            ready_idx = 5
+            doc_idx = 1
+            no_idx = 0
+        else:
             if len(cols) < 5:
                 cols = cols + [""] * (5 - len(cols))
-            cols4 = cols[:4]  # No. + first 3 content cols
-            if i == 0:
-                cols4 = ["No.", "Document", "Evidential Requirements", "Client Notes"]
-            out_lines.append("\t".join(c.strip() for c in cols4))
+            elif len(cols) > 5:
+                cols = cols[:4] + [" ".join(cols[4:])]
+            ready_idx = 4
+            doc_idx = 0
+            no_idx = None
+
+        stripped_cols = [c.strip() for c in cols]
+
+        if i == 0:
+            out.append("\t".join(stripped_cols))
+            continue
+
+        normalized = [c.lstrip("'").strip() for c in stripped_cols if c]
+        is_heading = any(c.startswith("===") for c in normalized)
+        is_blank_row = (len(normalized) == 0)
+
+        doc_cell = stripped_cols[doc_idx].lstrip("'").strip()
+        is_document_row = (doc_cell != "") and (not is_heading) and (not is_blank_row)
+
+        if is_document_row:
+            if no_idx is not None:
+                no_cell = stripped_cols[no_idx].strip()
+                cols[ready_idx] = "☐" if no_cell else ""
+            else:
+                cols[ready_idx] = "☐"
         else:
-            if len(cols) < 4:
-                cols = cols + [""] * (4 - len(cols))
-            cols3 = cols[:3]
-            if i == 0:
-                cols3 = ["Document", "Evidential Requirements", "Client Notes"]
-            out_lines.append("\t".join(c.strip() for c in cols3))
+            cols[ready_idx] = ""
+
+        out.append("\t".join(c.strip() for c in cols))
+
+    return "\n".join(out).strip()
+
+
+def strip_authority_column(tsv_text: str) -> str:
+    """
+    Convert INTERNAL TSV into CLIENT TSV by removing Rule Authority only,
+    while keeping GDrive Link + Ready To Review.
+
+    Input internal (7 cols):
+      No. | Document | Evidential | Client Notes | GDrive Link | Ready To Review | Rule Authority
+
+    Output client (5 cols):
+      Document | Evidential | Client Notes | GDrive Link | Ready To Review
+    """
+    out_lines = []
+    lines = tsv_text.splitlines()
+    if not lines:
+        return tsv_text
+
+    for i, line in enumerate(lines):
+        cols = line.split("\t")
+
+        if len(cols) < 7:
+            cols = cols + [""] * (7 - len(cols))
+        elif len(cols) > 7:
+            cols = cols[:6] + [" ".join(cols[6:])]
+
+        client_cols = cols[1:6]
+
+        if i == 0:
+            client_cols = ["Document", "Evidential Requirements", "Client Notes", "GDrive Link", "Ready To Review"]
+
+        out_lines.append("\t".join(c.strip() for c in client_cols))
 
     return "\n".join(out_lines).strip()
 
 
 def tsv_to_dataframe(tsv_text: str) -> pd.DataFrame:
-    """
-    Convert TSV text into a DataFrame.
-    Assumes first row is header.
-    """
     if not tsv_text.strip():
         return pd.DataFrame()
     return pd.read_csv(io.StringIO(tsv_text), sep="\t", dtype=str).fillna("")
 
 
 def dataframe_to_formatted_xlsx_bytes(df: pd.DataFrame, sheet_name="Status Sheet") -> bytes:
-    """
-    Export DataFrame to a formatted Excel file (bytes) using openpyxl:
-    - wrap text
-    - centre align
-    - bold header
-    - freeze row 1
-    - set column widths
-    """
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Alignment, Font, Border, Side
@@ -587,7 +630,6 @@ def dataframe_to_formatted_xlsx_bytes(df: pd.DataFrame, sheet_name="Status Sheet
     header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     cell_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-    # Write header
     ws.append(list(df.columns))
     for col_idx in range(1, len(df.columns) + 1):
         cell = ws.cell(row=1, column=col_idx)
@@ -595,7 +637,6 @@ def dataframe_to_formatted_xlsx_bytes(df: pd.DataFrame, sheet_name="Status Sheet
         cell.alignment = header_alignment
         cell.border = border
 
-    # Write body
     for row_vals in df.itertuples(index=False):
         ws.append(list(row_vals))
 
@@ -604,10 +645,8 @@ def dataframe_to_formatted_xlsx_bytes(df: pd.DataFrame, sheet_name="Status Sheet
             cell.alignment = cell_alignment
             cell.border = border
 
-    # Freeze header row
     ws.freeze_panes = "A2"
 
-    # Column widths
     for col_idx, col_name in enumerate(df.columns, start=1):
         values = [str(col_name)] + [str(v) for v in df.iloc[:, col_idx - 1].values]
         max_len = max(len(v) for v in values)
@@ -621,153 +660,130 @@ def dataframe_to_formatted_xlsx_bytes(df: pd.DataFrame, sheet_name="Status Sheet
 
 
 # =========================
-# Filter options (label -> precise model instruction)
+# Filter options
 # =========================
 FILTER_OPTIONS = {
     "Full checklist": None,
-
     "Mandatory documents only": (
         "Return ONLY documents that are strictly mandatory under the Immigration Rules or Home Office guidance "
         "(i.e., specified evidence or items without which the application is likely to be refused/invalid). "
         "Exclude purely recommended/supporting documents unless they are needed to satisfy a mandatory requirement."
     ),
-
     "Identity / nationality evidence only": (
         "Return ONLY identity and nationality evidence. Include passports/travel documents, BRP/eVisa status proof, "
         "national ID cards, biometrics/photo requirements where relevant, name-change evidence, and any identity-linked "
         "civil documents. Exclude financial, relationship, accommodation, or other categories."
     ),
-
     "Immigration history / status evidence only": (
         "Return ONLY evidence relating to the applicant’s UK immigration history and current/previous status. "
         "Include current grant/leave evidence, visa vignettes, entry/exit stamps, prior approvals/refusals/curtailments, "
         "overstay or breach explanations, conditions of leave, and any required history disclosures."
     ),
-
     "Application forms / administrative evidence only": (
         "Return ONLY administrative/process documents needed to lodge the application. "
         "Include online application form confirmation, IHS/payment receipts, appointment/biometrics confirmation, "
         "consent forms, document checklists, and any required declarations. "
         "Include translation/certification requirements ONLY insofar as they relate to admin validity."
     ),
-
     "Financial requirement evidence only": (
         "Return ONLY evidence proving the financial requirement for the route. "
         "Include specified evidence per the Rules/guidance: payslips, bank statements, employer letters, tax returns, "
         "audited/unaudited accounts, dividend vouchers, savings evidence, pension evidence, benefits letters, "
         "and evidence of source/ownership of funds where required."
     ),
-
     "Accommodation evidence only": (
         "Return ONLY evidence proving adequate accommodation. "
         "Include tenancy/mortgage documents, landlord/freeholder consent, property ownership proof, "
         "property inspection/overcrowding reports where relevant, utilities/council tax if used to prove residence, "
         "and sponsor residence proof tied to accommodation adequacy."
     ),
-
     "English language evidence only": (
         "Return ONLY evidence proving English language requirement or exemption. "
         "Include approved SELT certificate, degree taught in English plus ECCTIS/UK NARIC comparability if required, "
         "nationality-based exemptions, age/medical exemptions with supporting proof."
     ),
-
     "Relationship / family evidence only": (
         "Return ONLY evidence proving relationship/family link. "
         "Include marriage/civil partnership certificates, divorce/death certificates, evidence of durable partnership, "
         "cohabitation evidence, communication/interaction evidence, family composition proof. "
         "Exclude genuineness-focused narrative unless it is part of proving the relationship."
     ),
-
     "Genuine relationship / genuine intention evidence only": (
         "Return ONLY evidence aimed at demonstrating a genuine relationship or genuine intention to live together/continue "
         "the relationship (where required). "
         "Include relationship timeline, communications, visits, shared life evidence, joint commitments, "
         "statements addressing genuineness. Exclude civil status documents unless needed to support genuineness."
     ),
-
     "Employment / role evidence only": (
         "Return ONLY evidence of a job/role where employment is a core requirement. "
         "Include CoS, job offer/contract, SOC code fit evidence, salary breakdown, start date confirmation, "
         "sponsor licence/status proof, employer letters describing duties. "
         "Exclude general financial evidence unless required to prove salary for the role."
     ),
-
     "Qualifications / skills evidence only": (
         "Return ONLY evidence of qualifications/skills relevant to eligibility. "
         "Include degree certificates/transcripts, professional qualifications, registrations/licences, "
         "ATAS if applicable, evidence of equivalency or recognition where required."
     ),
-
     "Maintenance / funds evidence only (non-salary routes)": (
         "Return ONLY evidence of maintenance/funds where the route requires proof of funds rather than salary "
         "(e.g., Student/Visitor/PBS dependants). "
         "Include bank statements showing required level and holding period, proof of ownership/control, "
         "sponsor undertaking where permitted, financial consent letters if jointly held."
     ),
-
     "Sponsor evidence only": (
         "Return ONLY evidence relating to the sponsor. "
         "Include sponsor identity/status (passport/BRP/eVisa/ILR/citizenship), immigration permission, "
         "residence in the UK if required, sponsor employment/financial documents only where sponsor-led financial "
         "requirements apply."
     ),
-
     "Dependants’ evidence only": (
         "Return ONLY evidence needed for dependants (partner/children/other dependants). "
         "Include relationship to main applicant, dependency evidence, age evidence, living arrangements, "
         "and route-specific dependant requirements."
     ),
-
     "Children / parental responsibility evidence only": (
         "Return ONLY evidence concerning children and parental responsibility. "
         "Include full birth certificates, adoption/custody orders, parental consent letters, "
         "sole responsibility evidence, evidence of child’s residence, school/medical records where used to show care."
     ),
-
     "Study / CAS evidence only": (
         "Return ONLY study-related evidence for Student routes. "
         "Include CAS statement/number, offer letters, course details, tuition payment evidence if relevant, "
         "academic progression evidence, ATAS where required."
     ),
-
     "Business / investment evidence only": (
         "Return ONLY business/investment-related evidence for entrepreneurship/investor/GBM/self-sponsorship style routes. "
         "Include business plans, company registration/ownership, corporate structures, share certificates, "
         "investment source and availability evidence, contracts/invoices, overseas business link evidence for GBM routes."
     ),
-
     "TB / medical evidence only": (
         "Return ONLY TB/medical evidence. "
         "Include TB test certificates from approved clinics where required, "
         "medical evidence supporting exemptions or compassionate/discretionary factors where relevant."
     ),
-
     "Criminality / character evidence only": (
         "Return ONLY evidence relating to criminality/character. "
         "Include police certificates where required, court records, sentencing details, rehabilitation evidence, "
         "and explanatory statements addressing character/suitability."
     ),
-
     "Suitability / refusal-risk evidence only": (
         "Return ONLY evidence aimed at addressing suitability or refusal risks. "
         "Include explanations and proof relating to deception concerns, overstays/breaches, sham/genuineness doubts, "
         "credibility gaps, inconsistencies, previous refusals, and mitigation evidence."
     ),
-
     "Exceptional circumstances / discretion evidence only": (
         "Return ONLY evidence supporting exceptional circumstances or discretionary grants. "
         "Include Article 8/private and family life factors, compelling compassionate evidence, hardship, "
         "best-interests-of-child materials, medical dependency evidence, "
         "and any other materials supporting discretion outside strict rule satisfaction."
     ),
-
     "Translations / format / copy certification evidence only": (
         "Return ONLY evidence about translations, formatting, and certification. "
         "Include requirements for certified translations, translator credentials, "
         "copy certification wording, legibility/completeness requirements (e.g., all pages of statements), "
         "and document date/validity formatting rules."
     ),
-
     "Country-specific evidence only": (
         "Return ONLY country-specific evidence requirements triggered by nationality/location. "
         "Include TB test triggers, local civil document formats, apostille/legalisation norms, "
@@ -795,7 +811,13 @@ st.markdown(
 st.markdown(
     "Provide the immigration route and the case facts in separate fields. "
     "The app will generate a rule-based document status sheet "
-    "in 5 columns suitable for Google Sheets, including numbering, client-ready notes, and rule authority."
+    "in 7 columns for internal review (including numbering, GDrive Link, Ready To Review markers, and rule authority) "
+    "and a 5-column client version."
+)
+
+st.info(
+    "After pasting into Google Sheets, run your shared 'Status Sheet → Format + Checkboxes' Apps Script "
+    "to convert the ☒/☐ markers into TRUE Google Sheets checkboxes."
 )
 
 uploaded_doc = st.file_uploader(
@@ -844,23 +866,28 @@ if submit and (route.strip() or facts.strip()):
             filter_label=filter_label
         )
 
+        # 6-col base cleanup
         reply = sanitize_for_sheets(reply)
+
+        # Add No. (7 cols)
         reply = add_numbering_column(reply)
 
+        # Add checkbox markers into Ready column (7 cols)
+        reply = add_ready_checkboxes(reply)
+
         st.session_state["internal_tsv"] = reply
-        st.session_state.pop("client_tsv", None)  # reset client version on new run
+        st.session_state.pop("client_tsv", None)  # reset client on new run
 
         st.success("Status sheet generated.")
 
         st.subheader("Status Sheet Output")
-        tab_internal, tab_client = st.tabs(["Internal review (5 columns)", "Client version (4 columns)"])
+        tab_internal, tab_client = st.tabs(["Internal review (7 columns)", "Client version (5 columns)"])
 
         with tab_internal:
-            st.write("Includes Rule Authority column for lawyer review.")
+            st.write("Includes Rule Authority, numbering, GDrive Link, and Ready To Review markers.")
             internal_tsv = st.session_state.get("internal_tsv", reply)
             st.code(internal_tsv, language="text")
 
-            # Formatted XLSX download (internal)
             internal_df = tsv_to_dataframe(internal_tsv)
             if not internal_df.empty:
                 try:
@@ -881,6 +908,8 @@ if submit and (route.strip() or facts.strip()):
             if make_client:
                 internal_tsv = st.session_state.get("internal_tsv", "")
                 client_tsv = strip_authority_column(internal_tsv) if internal_tsv else ""
+                # Ensure Ready markers persist for client TSV too
+                client_tsv = add_ready_checkboxes(client_tsv)
                 st.session_state["client_tsv"] = client_tsv
 
             client_tsv = st.session_state.get("client_tsv", "")
@@ -893,7 +922,6 @@ if submit and (route.strip() or facts.strip()):
                     mime="text/tab-separated-values"
                 )
 
-                # Formatted XLSX download (client)
                 client_df = tsv_to_dataframe(client_tsv)
                 if not client_df.empty:
                     try:
