@@ -838,7 +838,7 @@ def dataframe_to_formatted_xlsx_bytes(df: pd.DataFrame, sheet_name="Status Sheet
 # Filter options (label -> precise model instruction)
 # =========================
 FILTER_OPTIONS = {
-    "Full checklist": None,
+    "Full DSS": None,
     "Mandatory documents only": (
         "Return ONLY documents that are strictly mandatory under the Immigration Rules or Home Office guidance "
         "(i.e., specified evidence or items without which the application is likely to be refused/invalid). "
@@ -963,7 +963,7 @@ st.markdown(
 )
 
 st.info(
-    "Please download as Excel. You can then copy/paste into Google Sheets. "
+    "Please download as Excel. Then copy/paste into your Google Sheets DSS template. "
 )
 
 uploaded_doc = st.file_uploader(
@@ -983,15 +983,15 @@ with st.form("checklist_form"):
     route = st.text_area(
         "Immigration Route",
         height=140,
-        placeholder="Provide the type of application, applying inside/outside UK, under which Appendix of the Rules."
+        placeholder="Provide the immigration route, type of application (EC, FLR, ILR etc) and Appendix of the Rules."
     )
     facts = st.text_area(
         "Relevant Facts",
         height=260,
         placeholder=(
             "Provide the key case facts needed to generate the DSS. "
-            "For example, include, as relevant: applicant / sponsor's nationality and current location (inside/outside the UK), current immigration status/visa history, the exact application type (e.g. immigration route and entry clearance/extension/ILR/switch), any dependants, finances/funding (salary, self-employment, savings, sponsor support, maintenance), accommodation or course/employment details if applicable, English language position or exemptions, and any risks/complications (previous refusals, overstays, criminality, medical/TB issues, missing documents, urgent deadlines). "
-            "Plain English is fine, but detail in = detail out."
+            "Detail in equals detail out."
+            "Plain English is fine."
         )
     )
     submit = st.form_submit_button("Generate DSS")
