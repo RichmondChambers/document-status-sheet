@@ -234,7 +234,22 @@ Hard rules:
 - Always reflect the April 2024 Appendix FM financial requirement (£29,000).
 - Do NOT say two passport-sized photos are required.
 
-Output rules (SPREADSHEET-READY TSV, CLIENT + LAWYER REVIEW):
+Section structure for a FULL DSS (no filter applied):
+- You MUST organise the checklist into sections in this order and with these titles:
+  * Section A: Application Documents
+  * Section B: Nationality & Identity
+  * Section C: Immigration History
+  * Section D onwards: other logical sections required by the Immigration Rules (e.g. Financial Requirement, Relationship Requirement, Accommodation, English Language, Criminality, Suitability, etc.).
+- Where there is a Relationship Requirement under the Immigration Rules or guidance, this MUST always have its own section (e.g. "Relationship Requirement" or "Relationship Evidence") and must NOT be merged into identity, nationality, immigration history or other sections.
+- The final section in a full DSS MUST always be: "Document Format and Translations". This section should cover format requirements, translation requirements, copy certification, and any specific document-format rules.
+
+Section structure for a FILTERED DSS (where a filter is requested):
+- Begin with a Filtered Checklist row:
+  Filtered Checklist: {filter_label}<TAB><TAB><TAB><TAB><TAB><TAB>
+- Only include sections that are relevant to the filtered evidence type (for example, for "Accommodation evidence only", only accommodation-related sections and the document-format/translation section).
+- The last section in a filtered DSS should still be a "Document Format and Translations" section, limited to the aspects relevant to the filtered documents.
+
+Other output rules (SPREADSHEET-READY TSV, CLIENT + LAWYER REVIEW):
 - You MUST output ONLY tab-separated values (TSV). No Markdown, no bullets, no numbering, no pipes "|".
 - Produce EXACTLY 7 columns per row:
   Column A: Document
@@ -246,10 +261,14 @@ Output rules (SPREADSHEET-READY TSV, CLIENT + LAWYER REVIEW):
   Column G: Rule Authority (pinpoint paragraph reference + a SHORT supporting quotation)
 - First row MUST be the header exactly:
   Document<TAB>Evidential Requirements<TAB>Client Notes<TAB>GDrive Link<TAB>Ready To Review<TAB>Status<TAB>Rule Authority
-- Do NOT include any extra text before or after the TSV.
 - Put section titles as a standalone row in Column A only, like:
+  Section: Application Documents<TAB><TAB><TAB><TAB><TAB><TAB>
+  Section: Nationality & Identity<TAB><TAB><TAB><TAB><TAB><TAB>
+  Section: Immigration History<TAB><TAB><TAB><TAB><TAB><TAB>
   Section: Financial Requirement<TAB><TAB><TAB><TAB><TAB><TAB>
+  etc.
   (Do NOT include any === symbols.)
+- Call the main advocacy document "Legal Submissions" (not "Cover Letter").
 - NEVER start any cell with "=", "+", "-", or "@".
   If unavoidable, prefix that cell with "'".
 - Client Notes must be concise, readable, and suitable to send to a client.
@@ -258,8 +277,7 @@ Output rules (SPREADSHEET-READY TSV, CLIENT + LAWYER REVIEW):
   (ii) a supporting quote no longer than ~25 words.
 - If a filter is requested:
   * output ONLY that subset;
-  * begin with a section row:
-    Filtered Checklist: {filter_label}<TAB><TAB><TAB><TAB><TAB><TAB>
+  * begin with a Filtered Checklist row as described above.
 - If you cannot find supporting rule text using lookup_rule, state that briefly in Rule Authority
   and keep the document as "Recommended (not mandatory)" where appropriate.
 
@@ -522,99 +540,26 @@ def standardise_document_names(tsv_text: str) -> str:
     return "\n".join(out).strip()
 
 
-def reletter_section_headings(tsv_text: str, filter_applied: bool = False) -> str:
+def reletter_section_headings(tsv_text: str) -> str:
     """
-    Enforce section headings and lettering.
+    Rewrite section heading rows to:
+      Section A: Title
+      Section B: Title
+      ...
+    Removes any ===.
+    Leaves Filtered Checklist row unlettered.
 
-    If filter_applied is False (full DSS):
-        - Section A: Application Documents
-        - Section B: Nationality & Identity
-        - Section C: Immigration History
-        - Section D+ : model-generated titles
-        - Last section: Document Format and Translations (append if missing)
-
-    If filter_applied is True (filtered DSS):
-        - Do NOT force Application Documents / Nationality & Identity / Immigration History.
-        - Letter section headings in order as Section A, B, C, ...
-        - Last section: Document Format and Translations (append if missing).
-        - Always respect the leading "Filtered Checklist: ..." row.
-
-    Runs BEFORE numbering/checkbox logic.
+    IMPORTANT: this function DOES NOT move any document rows between sections,
+    and DOES NOT change the semantic title text beyond cleaning prefixes.
     """
     lines = tsv_text.splitlines()
     if not lines:
         return tsv_text
 
-    heading_indices = []
-    heading_titles_clean = []
-    has_document_format_section = False
-
-    def clean_heading(raw: str) -> str:
-        cleaned = raw.replace("===", "")
-        cleaned = cleaned.replace("<TAB>", " ").replace("\\t", " ")
-        cleaned = re.sub(r"^Section\s*:?\s*", "", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"^Section\s+[A-Z]\s*:?\s*", "", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"\s+", " ", cleaned).strip()
-        return cleaned
-
-    # -------- First pass: discover headings --------
-    for i, line in enumerate(lines):
-        if i == 0:
-            continue  # header
-
-        cols = line.split("\t")
-        if len(cols) < 7:
-            cols = cols + [""] * (7 - len(cols))
-        elif len(cols) > 7:
-            cols = cols[:6] + [" ".join(cols[6:])]
-
-        doc_cell_raw = cols[0]
-        doc_cell_norm = doc_cell_raw.lstrip("'").strip()
-
-        # Skip the Filtered Checklist row from heading list
-        if doc_cell_norm.lower().startswith("filtered checklist"):
-            continue
-
-        if is_section_heading_row([doc_cell_norm]):
-            cleaned = clean_heading(doc_cell_norm)
-            heading_indices.append(i)
-            heading_titles_clean.append(cleaned)
-            if ("format" in cleaned.lower() and "translation" in cleaned.lower()) or (
-                "translations" in cleaned.lower() and "document" in cleaned.lower()
-            ):
-                has_document_format_section = True
-
-    total_headings = len(heading_indices)
-    letters = list(string.ascii_uppercase)
+    out = []
     letter_idx = 0
+    letters = list(string.ascii_uppercase)
 
-    # -------- Mapping for full DSS mode --------
-    def enforced_title_full(pos: int, cleaned: str) -> str:
-        # First three headings fixed
-        if pos == 0:
-            return "Application Documents"
-        if pos == 1:
-            return "Nationality & Identity"
-        if pos == 2:
-            return "Immigration History"
-
-        # Last heading becomes Document Format & Translations if present
-        if has_document_format_section and pos == total_headings - 1:
-            return "Document Format and Translations"
-
-        return cleaned or "Other Documents"
-
-    # -------- Mapping for filtered mode --------
-    def enforced_title_filtered(pos: int, cleaned: str) -> str:
-        # In filtered mode, we keep the model’s structure.
-        if has_document_format_section and pos == total_headings - 1:
-            return "Document Format and Translations"
-        return cleaned or "Other Documents"
-
-    index_to_heading_pos = {idx: pos for pos, idx in enumerate(heading_indices)}
-    out_lines = []
-
-    # -------- Second pass: rewrite rows --------
     for i, line in enumerate(lines):
         cols = line.split("\t")
         if len(cols) < 7:
@@ -623,51 +568,44 @@ def reletter_section_headings(tsv_text: str, filter_applied: bool = False) -> st
             cols = cols[:6] + [" ".join(cols[6:])]
 
         if i == 0:
-            out_lines.append("\t".join(cols))
+            out.append("\t".join(cols))
             continue
 
-        doc_cell_raw = cols[0]
-        doc_cell_norm = doc_cell_raw.lstrip("'").strip()
+        doc_cell = cols[0].lstrip("'").strip()
 
-        # Filtered Checklist row stays as-is, unlettered
-        if doc_cell_norm.lower().startswith("filtered checklist"):
-            cleaned = re.sub(r"^=+\s*", "", doc_cell_norm).strip()
+        # Leave "Filtered Checklist" heading without section lettering
+        if doc_cell.lower().startswith("filtered checklist"):
+            cleaned = re.sub(r"^=+\s*", "", doc_cell).strip()
             cleaned = cleaned.replace("<TAB>", " ").replace("\\t", " ")
             cleaned = re.sub(r"\s+", " ", cleaned).strip()
             cols[0] = cleaned
             cols[1:] = [""] * 6
-            out_lines.append("\t".join(cols))
+            out.append("\t".join(cols))
             continue
 
-        if i in index_to_heading_pos:
-            pos = index_to_heading_pos[i]
-            cleaned = clean_heading(doc_cell_norm)
+        if is_section_heading_row([doc_cell]):
+            # Base cleaning
+            cleaned = doc_cell.replace("===", "")
+            cleaned = cleaned.replace("<TAB>", " ").replace("\\t", " ")
+            cleaned = re.sub(r"^Section\s*:?\s*", "", cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(r"^Section\s+[A-Z]\s*:?\s*", "", cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
 
-            letter = letters[letter_idx] if letter_idx < len(letters) else f"({letter_idx+1})"
+            letter = (
+                letters[letter_idx]
+                if letter_idx < len(letters)
+                else f"({letter_idx+1})"
+            )
             letter_idx += 1
 
-            if filter_applied:
-                title = enforced_title_filtered(pos, cleaned)
-            else:
-                title = enforced_title_full(pos, cleaned)
-
-            cols[0] = f"Section {letter}: {title}"
+            cols[0] = f"Section {letter}: {cleaned}"
             cols[1:] = [""] * 6
-            out_lines.append("\t".join(cols))
+            out.append("\t".join(cols))
             continue
 
-        out_lines.append("\t".join(cols))
+        out.append("\t".join(cols))
 
-    # -------- Third pass: ensure final Document Format & Translations section --------
-    if not has_document_format_section:
-        # Append a new last section
-        letter = letters[letter_idx] if letter_idx < len(letters) else f"({letter_idx+1})"
-        last_section_row = (
-            f"Section {letter}: Document Format and Translations\t\t\t\t\t\t"
-        )
-        out_lines.append(last_section_row)
-
-    return "\n".join(out_lines).strip()
+    return "\n".join(out).strip()
 
 
 def remove_blank_rows(tsv_text: str) -> str:
@@ -953,21 +891,17 @@ def dataframe_to_formatted_xlsx_bytes(df: pd.DataFrame, sheet_name="Status Sheet
                     ws.cell(row=r_idx, column=doc_col_idx).value or ""
                 ).strip()
                 if doc_val:
-                    from openpyxl.utils import get_column_letter
-
                     col_letter = get_column_letter(status_col_idx)
                     dv_status.add(f"{col_letter}{r_idx}")
 
     ws.freeze_panes = "A2"
 
     # Column widths
-    from openpyxl.utils import get_column_letter as _get_column_letter
-
     for col_idx, col_name in enumerate(df.columns, start=1):
         values = [str(col_name)] + [str(v) for v in df.iloc[:, col_idx - 1].values]
         max_len = max(len(v) for v in values)
         width = min(max(max_len * 0.9, 10), 60)
-        ws.column_dimensions[_get_column_letter(col_idx)].width = width
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
 
     buffer = io.BytesIO()
     wb.save(buffer)
@@ -1151,11 +1085,7 @@ if submit and (route.strip() or facts.strip()):
 
         reply = sanitize_for_sheets(reply)
         reply = standardise_document_names(reply)
-
-        # Filter applied for any option other than "Full DSS"
-        filter_applied = (filter_label != "Full DSS")
-
-        reply = reletter_section_headings(reply, filter_applied=filter_applied)
+        reply = reletter_section_headings(reply)
         reply = remove_blank_rows(reply)
         reply = add_numbering_column(reply)
         reply = add_ready_checkboxes(reply)
@@ -1165,7 +1095,7 @@ if submit and (route.strip() or facts.strip()):
         st.session_state["tsv"] = reply
         st.success("Status sheet generated.")
 
-        st.subheader("Status Sheet Preview (TSV)")
+        st.subheader("Status Sheet Preview")
         st.code(reply, language="text")
 
         df = tsv_to_dataframe(reply)
