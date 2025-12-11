@@ -422,10 +422,14 @@ def render_logo():
 
 def sanitize_for_sheets(tsv_text: str) -> str:
     lines = []
-    for line in tsv_text.splitlines():
+    for raw_line in tsv_text.splitlines():
+        # 🔹 Normalise any literal "<TAB>" or "\t" text into real tab characters
+        line = raw_line.replace("<TAB>", "\t").replace("\\t", "\t")
+
+        # Remove any stray pipe characters
         line = line.replace("|", "")
 
-        # ✅ NEW: remove trailing tab-created empty columns
+        # ✅ Remove trailing tab-created empty columns
         cols = line.split("\t")
         while cols and cols[-1] == "":
             cols.pop()
@@ -446,6 +450,8 @@ def sanitize_for_sheets(tsv_text: str) -> str:
         safe_cols = []
         for c in cols:
             c = c.strip()
+            # Strip any leftover literal "<TAB>" tokens just in case
+            c = c.replace("<TAB>", " ").replace("\\t", " ")
             if c.startswith(("=", "+", "-", "@")):
                 c = "'" + c
             safe_cols.append(c)
@@ -499,15 +505,21 @@ def reletter_section_headings(tsv_text: str) -> str:
 
         if doc_cell.lower().startswith("filtered checklist"):
             cleaned = re.sub(r"^=+\s*", "", doc_cell).strip()
+            # Also strip any literal "<TAB>" tokens from filtered headings
+            cleaned = cleaned.replace("<TAB>", " ").replace("\\t", " ")
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
             cols[0] = cleaned
             cols[1:] = [""] * 6
             out.append("\t".join(cols))
             continue
 
         if is_section_heading_row([doc_cell]):
-            cleaned = doc_cell.replace("===", "").strip()
-            cleaned = re.sub(r"^Section\s*:?\s*", "", cleaned, flags=re.IGNORECASE).strip()
-            cleaned = re.sub(r"^Section\s+[A-Z]\s*:?\s*", "", cleaned, flags=re.IGNORECASE).strip()
+            # Base cleaning
+            cleaned = doc_cell.replace("===", "")
+            cleaned = cleaned.replace("<TAB>", " ").replace("\\t", " ")
+            cleaned = re.sub(r"^Section\s*:?\s*", "", cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(r"^Section\s+[A-Z]\s*:?\s*", "", cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
 
             letter = letters[letter_idx] if letter_idx < len(letters) else f"({letter_idx+1})"
             letter_idx += 1
