@@ -990,7 +990,7 @@ with st.form("checklist_form"):
         height=260,
         placeholder=(
             "Provide the key case facts needed to generate the DSS. "
-            "Detail in equals detail out."
+            "Detail in equals detail out. "
             "Plain English is fine."
         )
     )
