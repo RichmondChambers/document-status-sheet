@@ -16,6 +16,14 @@ import string
 from index_builder import sync_drive_and_rebuild_index_if_needed, INDEX_FILE, METADATA_FILE
 
 # =========================
+# Constants for feedback / corrections
+# =========================
+
+CORRECTIONS_FILE = "corrections.jsonl"
+FEEDBACK_LOG_FILE = "feedback_log.jsonl"
+
+
+# =========================
 # 0. Google SSO
 # =========================
 
@@ -194,6 +202,168 @@ def search_index(query, k=8, source_type=None):
 
 
 # =========================
+# 4A. Feedback / corrections helpers
+# =========================
+
+def append_jsonl(path: str, record: dict) -> None:
+    """
+    Append a single JSON record to a .jsonl file.
+    """
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as e:
+        # For internal use, surface as a warning rather than failing the app.
+        st.warning(f"Could not write to {path}: {e}")
+
+
+def load_corrections(path: str = CORRECTIONS_FILE) -> list[dict]:
+    """
+    Load all route-specific corrections from a JSONL file.
+    Each record is expected to contain at least:
+      - route_hint: str (lowercased substring of route description)
+      - instruction: str (concise override instruction)
+    """
+    corrections: list[dict] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    corrections.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except FileNotFoundError:
+        # No corrections yet
+        pass
+    except Exception as e:
+        st.warning(f"Could not load corrections from {path}: {e}")
+    return corrections
+
+
+def summarise_feedback_to_instruction(route_text: str, feedback_text: str) -> str:
+    """
+    Use the OpenAI API to compress raw feedback into a single, precise
+    route-specific instruction (under ~40 words) that corrects the error.
+    Falls back to the original feedback if anything goes wrong.
+    """
+    route_clean = (route_text or "").strip()
+    feedback_clean = (feedback_text or "").strip()
+
+    if not feedback_clean:
+        return ""
+
+    try:
+        resp = client.responses.create(
+            model="gpt-5.1",
+            input=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a UK immigration lawyer. Rewrite the user's feedback into a single, precise instruction "
+                        "that corrects an error in a document checklist. The sentence must be under 40 words, "
+                        "route-specific, and phrased as a 'must' or 'must not' rule."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"ROUTE DESCRIPTION:\n{route_clean}\n\n"
+                        f"FEEDBACK (legal error description):\n{feedback_clean}"
+                    ),
+                },
+            ],
+            temperature=0.0,
+        )
+        instruction = (getattr(resp, "output_text", "") or "").strip()
+        if not instruction:
+            instruction = feedback_clean
+        return instruction
+    except Exception as e:
+        st.warning(f"Could not summarise feedback into an instruction: {e}")
+        return feedback_clean
+
+
+def get_applicable_correction_prompts(route_text: str) -> list[str]:
+    """
+    Return a list of correction instructions whose route_hint appears in the route text.
+    Matching is deliberately simple and conservative.
+    """
+    if not route_text or not route_text.strip():
+        return []
+
+    route_lower = route_text.lower()
+    prompts: list[str] = []
+    for entry in load_corrections():
+        hint = str(entry.get("route_hint", "")).lower().strip()
+        # Support both 'instruction' and legacy 'prompt' keys
+        instruction = str(entry.get("instruction") or entry.get("prompt") or "").strip()
+        if hint and instruction and hint in route_lower:
+            prompts.append(instruction)
+    return prompts
+
+
+def build_correction_prompt(route_text: str, feedback_text: str) -> dict | None:
+    """
+    Turn raw feedback into a route-scoped correction entry, using the model
+    to create a concise one-line instruction.
+    """
+    route_hint = (route_text or "").strip()
+    feedback_clean = (feedback_text or "").strip()
+
+    if not route_hint or not feedback_clean:
+        return None
+
+    # Use a short route hint (first line / up to 120 chars), lowercased for matching
+    first_line = route_hint.splitlines()[0].strip()
+    if len(first_line) > 120:
+        first_line = first_line[:117] + "..."
+    route_hint_normalised = first_line.lower()
+
+    concise_instruction = summarise_feedback_to_instruction(route_hint, feedback_clean)
+    concise_instruction = concise_instruction.strip()
+    if not concise_instruction:
+        return None
+
+    return {
+        "route_hint": route_hint_normalised,
+        "instruction": concise_instruction,
+    }
+
+
+def log_feedback_and_optionally_add_correction(
+    user_email: str,
+    route_text: str,
+    facts_text: str,
+    filter_label: str,
+    tsv_output: str,
+    feedback_text: str,
+) -> None:
+    """
+    1. Log full feedback (for audit/training) to FEEDBACK_LOG_FILE.
+    2. Add a lightweight route-specific correction entry to CORRECTIONS_FILE
+       so future runs for similar routes pick up the override.
+    """
+    # 1. Full feedback log
+    feedback_record = {
+        "user_email": user_email,
+        "route": route_text,
+        "facts": facts_text,
+        "filter_label": filter_label,
+        "tsv_output": tsv_output,
+        "feedback": feedback_text,
+    }
+    append_jsonl(FEEDBACK_LOG_FILE, feedback_record)
+
+    # 2. Optional correction entry
+    correction_entry = build_correction_prompt(route_text, feedback_text)
+    if correction_entry is not None:
+        append_jsonl(CORRECTIONS_FILE, correction_entry)
+
+
+# =========================
 # 5. Rule update date
 # =========================
 
@@ -233,6 +403,9 @@ Hard rules:
 - Quote/cite the exact relevant paragraph(s).
 - Always reflect the April 2024 Appendix FM financial requirement (£29,000).
 - Do NOT say two passport-sized photos are required.
+- If you are unsure whether a requirement applies, or you cannot find clear supporting rule text, you must treat that requirement as “Recommended (not mandatory)” and say so in Column G.
+- You must not create maintenance / English language / accommodation requirements based solely on your general training; they must appear in the Rules or guidance you have been given.
+- You MUST treat any “ROUTE-SPECIFIC CORRECTIONS / OVERRIDES” in the system/context as overriding your general knowledge for that route. Where there is a conflict, follow the corrections.
 
 Section structure for a FULL DSS (no filter applied):
 - You MUST organise the checklist into sections in this order and with these titles:
@@ -351,6 +524,13 @@ def generate_checklist(route_text, facts_text, extra_route_facts_text=None,
     if extra_route_facts_text and extra_route_facts_text.strip():
         grounding_context += "\n\nUPLOADED ROUTE/FACTS DOCUMENT:\n"
         grounding_context += extra_route_facts_text.strip()
+
+    # Route-specific corrections based on prior feedback
+    correction_prompts = get_applicable_correction_prompts(route_text)
+    if correction_prompts:
+        grounding_context += "\n\nROUTE-SPECIFIC CORRECTIONS / OVERRIDES (from prior feedback):\n"
+        for cp in correction_prompts:
+            grounding_context += f"- {cp}\n"
 
     user_instruction = enquiry_text
     if filter_mode:
@@ -1092,29 +1272,84 @@ if submit and (route.strip() or facts.strip()):
         # Move Column G content to Column H (except headings)
         reply = move_col_g_to_h(reply)
 
+        # Store in session_state so it persists across reruns
         st.session_state["tsv"] = reply
-        st.success("Status sheet generated.")
+        st.session_state["route"] = route
+        st.session_state["facts"] = facts
+        st.session_state["filter_label"] = filter_label
 
-        st.subheader("Status Sheet Preview")
-        st.code(reply, language="text")
+# Display preview, download, and feedback once a DSS exists
+if "tsv" in st.session_state and st.session_state["tsv"].strip():
+    tsv_output = st.session_state["tsv"]
+    st.success("Status sheet generated.")
 
-        df = tsv_to_dataframe(reply)
-        if not df.empty:
-            try:
-                xlsx_bytes = dataframe_to_formatted_xlsx_bytes(
-                    df, sheet_name="Status Sheet"
-                )
-                st.download_button(
-                    "Download formatted Excel (.xlsx)",
-                    data=xlsx_bytes,
-                    file_name="document_status_sheet.xlsx",
-                    mime=(
-                        "application/vnd.openxmlformats-officedocument."
-                        "spreadsheetml.sheet"
-                    ),
-                )
-            except Exception as e:
-                st.warning(f"Formatted Excel export unavailable: {e}")
+    st.subheader("Status Sheet Preview")
+    st.code(tsv_output, language="text")
+
+    df = tsv_to_dataframe(tsv_output)
+    if not df.empty:
+        try:
+            xlsx_bytes = dataframe_to_formatted_xlsx_bytes(
+                df, sheet_name="Status Sheet"
+            )
+            st.download_button(
+                "Download formatted Excel (.xlsx)",
+                data=xlsx_bytes,
+                file_name="document_status_sheet.xlsx",
+                mime=(
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
+            )
+        except Exception as e:
+            st.warning(f"Formatted Excel export unavailable: {e}")
+
+    # =========================
+    # Feedback UI (appears only after DSS generated)
+    # =========================
+
+    st.markdown("---")
+    st.subheader("Report a legal or Immigration Rules error")
+
+    st.write(
+        "If you spot any incorrect or missing legal requirements (for example, a maintenance funds requirement "
+        "where none exists), please describe the issue below. Your feedback will be logged and used to refine "
+        "future DSS's for similar routes."
+    )
+
+    feedback_text = st.text_area(
+        "Describe the legal issue and the correct position:",
+        height=160,
+        placeholder=(
+            "Example:\n"
+            "For Tier 1 (Investor) extension applications there is no maintenance funds requirement. "
+            "The DSS should not include a maintenance funds section for this route."
+        ),
+        key="feedback_text_area",
+    )
+
+    if st.button("Submit feedback on this DSS"):
+        if feedback_text.strip():
+            route_state = st.session_state.get("route", "")
+            facts_state = st.session_state.get("facts", "")
+            filter_state = st.session_state.get("filter_label", "")
+
+            log_feedback_and_optionally_add_correction(
+                user_email=user_email,
+                route_text=route_state,
+                facts_text=facts_state,
+                filter_label=filter_state,
+                tsv_output=tsv_output,
+                feedback_text=feedback_text,
+            )
+            st.success(
+                "Thank you. Your feedback has been recorded and a route-specific override has been added "
+                "for future DSS generation for similar routes."
+            )
+            # Optionally clear the text area
+            st.session_state["feedback_text_area"] = ""
+        else:
+            st.warning("Please enter some feedback before submitting.")
 
 st.markdown(
     """
@@ -1125,5 +1360,3 @@ AI-generated content must not be relied upon without human review. Where such co
 """,
     unsafe_allow_html=False,
 )
-
-
