@@ -1286,6 +1286,19 @@ if "tsv" in st.session_state and st.session_state["tsv"].strip():
     st.subheader("DSS Preview")
     st.code(tsv_output, language="text")
 
+    # =========================
+    # Professional Responsibility Statement
+    # (now appears immediately after the response / preview)
+    # =========================
+    st.markdown(
+        """
+**Professional Responsibility Statement**
+
+AI-generated content must not be relied upon without human review. Where such content is used, the barrister is responsible for verifying and ensuring the accuracy and legal soundness of that content. AI tools are used solely to support drafting and research; they do not replace the barrister’s independent judgment, analysis, or duty of care.
+""",
+        unsafe_allow_html=False,
+    )
+
     df = tsv_to_dataframe(tsv_output)
     if not df.empty:
         try:
@@ -1306,6 +1319,7 @@ if "tsv" in st.session_state and st.session_state["tsv"].strip():
 
     # =========================
     # Feedback UI (appears only after DSS generated)
+    # Now *after* the download button
     # =========================
 
     st.markdown("---")
@@ -1350,13 +1364,3 @@ if "tsv" in st.session_state and st.session_state["tsv"].strip():
             st.session_state["feedback_text_area"] = ""
         else:
             st.warning("Please enter some feedback before submitting.")
-
-st.markdown(
-    """
----
-**Professional Responsibility Statement**
-
-AI-generated content must not be relied upon without human review. Where such content is used, the barrister is responsible for verifying and ensuring the accuracy and legal soundness of that content. AI tools are used solely to support drafting and research; they do not replace the barrister’s independent judgment, analysis, or duty of care.
-""",
-    unsafe_allow_html=False,
-)
