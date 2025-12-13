@@ -1281,9 +1281,9 @@ if submit and (route.strip() or facts.strip()):
 # Display preview, download, and feedback once a DSS exists
 if "tsv" in st.session_state and st.session_state["tsv"].strip():
     tsv_output = st.session_state["tsv"]
-    st.success("Status sheet generated.")
+    st.success("DSS generated.")
 
-    st.subheader("Status Sheet Preview")
+    st.subheader("DSS Preview")
     st.code(tsv_output, language="text")
 
     df = tsv_to_dataframe(tsv_output)
@@ -1309,7 +1309,7 @@ if "tsv" in st.session_state and st.session_state["tsv"].strip():
     # =========================
 
     st.markdown("---")
-    st.subheader("Report a legal or Immigration Rules error")
+    st.subheader("Report a legal error")
 
     st.write(
         "If you spot any incorrect or missing legal requirements (for example, a maintenance funds requirement "
