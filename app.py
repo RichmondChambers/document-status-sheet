@@ -673,6 +673,31 @@ def sanitize_for_sheets(tsv_text: str) -> str:
 
     return "\n".join(lines).strip()
 
+def remove_duplicate_header_rows(tsv_text: str) -> str:
+    """
+    Some model outputs repeat the header row as a first data row.
+    This removes any non-first row that is effectively identical
+    to the header (same columns after trimming).
+    """
+    lines = tsv_text.splitlines()
+    if not lines:
+        return tsv_text
+
+    # Normalised header
+    header_cols = [c.strip() for c in lines[0].split("\t")]
+    header_norm = "\t".join(header_cols)
+
+    out = [lines[0]]  # keep the first header row
+
+    for line in lines[1:]:
+        cols = [c.strip() for c in line.split("\t")]
+        norm = "\t".join(cols)
+        if norm == header_norm:
+            # skip duplicate header-as-row
+            continue
+        out.append(line)
+
+    return "\n".join(out).strip()
 
 def is_section_heading_row(cells: list[str]) -> bool:
     normalized = [c.lstrip("'").strip() for c in cells if c.strip()]
@@ -1467,6 +1492,7 @@ if submit and (route.strip() or facts.strip()):
         )
 
         reply = sanitize_for_sheets(reply)
+        reply = remove_duplicate_header_rows(reply)  # <-- NEW LINE
         reply = standardise_document_names(reply)
         # Ensure witness statements are added as the last docs in Section A
         reply = ensure_witness_statements_in_section_a(reply, route, facts)
@@ -1476,8 +1502,8 @@ if submit and (route.strip() or facts.strip()):
         reply = remove_blank_rows(reply)
         reply = add_numbering_column(reply)
         reply = add_ready_checkboxes(reply)
-        # Move Column G content to Column H (except headings)
         reply = move_col_g_to_h(reply)
+
 
         # Store in session_state so it persists across reruns
         st.session_state["tsv"] = reply
