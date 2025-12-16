@@ -881,7 +881,7 @@ def ensure_witness_statements_in_section_a(
         row = [
             doc_name,
             "Signed witness statement setting out relevant background, facts and explanations in support of the application.",
-            "We will draft this with you. Please check the content carefully, ensure it is accurate and complete, then sign and date it.",
+            "We will draft this with you. Please check the content carefully, address any matters highlighted in red and ensure it is accurate and complete.",
             "",
             "",
             "",
