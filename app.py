@@ -1443,7 +1443,7 @@ st.markdown(
     "The app will generate a DSS. "
 )
 st.info(
-    "Please download as Excel. Then copy/paste into your Google Sheets DSS template. "
+    "Please download as Excel. Then copy/paste into a copy of your Google Sheets DSS template. "
 )
 
 uploaded_doc = st.file_uploader(
