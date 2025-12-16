@@ -406,6 +406,7 @@ Hard rules:
 - If you are unsure whether a requirement applies, or you cannot find clear supporting rule text, you must treat that requirement as “Recommended (not mandatory)” and say so in Column G.
 - You must not create maintenance / English language / accommodation requirements based solely on your general training; they must appear in the Rules or guidance you have been given.
 - You MUST treat any “ROUTE-SPECIFIC CORRECTIONS / OVERRIDES” in the system/context as overriding your general knowledge for that route. Where there is a conflict, follow the corrections.
+- Do NOT include a separate 'Legal Submissions', 'Cover Letter' or 'Advocacy Letter' document as a checklist item.
 
 Section structure for a FULL DSS (no filter applied):
 - You MUST organise the checklist into sections in this order and with these titles:
@@ -441,7 +442,7 @@ Other output rules (SPREADSHEET-READY TSV, CLIENT + LAWYER REVIEW):
   Section: Financial Requirement<TAB><TAB><TAB><TAB><TAB><TAB>
   etc.
   (Do NOT include any === symbols.)
-- Call the main advocacy document "Legal Submissions" (not "Cover Letter").
+- Call the main advocacy material simply part of the evidence within the relevant section (do not create a standalone Legal Submissions document row).
 - NEVER start any cell with "=", "+", "-", or "@".
   If unavoidable, prefix that cell with "'".
 - Client Notes must be concise, readable, and suitable to send to a client.
@@ -688,8 +689,8 @@ def is_section_heading_row(cells: list[str]) -> bool:
 
 def standardise_document_names(tsv_text: str) -> str:
     """
-    Normalise certain document names, e.g. force 'Legal Submissions'
-    instead of 'Cover Letter'.
+    Normalise certain document names, e.g. legacy 'Cover Letter' names.
+    (We later strip Legal Submissions / cover letters entirely.)
     """
     lines = tsv_text.splitlines()
     if not lines:
@@ -719,6 +720,208 @@ def standardise_document_names(tsv_text: str) -> str:
 
     return "\n".join(out).strip()
 
+
+# =========================
+# Witness Statement helpers (Section A)
+# =========================
+
+ORDINAL_LABELS = {
+    1: "First Applicant",
+    2: "Second Applicant",
+    3: "Third Applicant",
+    4: "Fourth Applicant",
+    5: "Fifth Applicant",
+}
+
+
+def infer_applicant_labels(route_text: str, facts_text: str) -> list[str]:
+    """
+    Very simple heuristic:
+    - Look for 'first applicant', 'second applicant', etc.
+    - If not found, look for 'applicant 1', 'applicant 2', etc.
+    - If still not found but 'applicant' appears, create generic
+      First/Second/Third Applicant labels.
+    - If nothing at all, assume a single Applicant.
+    """
+    blob = f"{route_text}\n{facts_text}"
+    lower_blob = blob.lower()
+    labels: list[str] = []
+    seen_indices: set[int] = set()
+
+    # 1. Explicit 'first applicant', 'second applicant', etc.
+    for idx, word in [(1, "first"), (2, "second"), (3, "third"),
+                      (4, "fourth"), (5, "fifth")]:
+        if re.search(rf"\b{word}\s+applicant\b", lower_blob):
+            labels.append(f"{word.capitalize()} Applicant")
+            seen_indices.add(idx)
+
+    # 2. 'applicant 1', 'applicant 2', etc.
+    for m in re.findall(r"\bapplicant\s+(\d+)\b", lower_blob):
+        try:
+            idx = int(m)
+        except ValueError:
+            continue
+        if 1 <= idx <= 10 and idx not in seen_indices:
+            seen_indices.add(idx)
+            if idx in ORDINAL_LABELS:
+                labels.append(ORDINAL_LABELS[idx])
+            else:
+                labels.append(f"Applicant {idx}")
+
+    # 3. If no structured labels, infer from number of 'applicant' mentions
+    if not labels:
+        count_mentions = len(re.findall(r"\bapplicants?\b", lower_blob))
+        if count_mentions > 1:
+            # Cap at 5 ordinals for sanity
+            for i in range(1, min(count_mentions, 5) + 1):
+                if i in ORDINAL_LABELS:
+                    labels.append(ORDINAL_LABELS[i])
+                else:
+                    labels.append(f"Applicant {i}")
+        elif count_mentions == 1:
+            labels.append("Applicant")
+
+    # 4. Fallback – single Applicant
+    if not labels:
+        labels.append("Applicant")
+
+    return labels
+
+
+def ensure_witness_statements_in_section_a(
+    tsv_text: str, route_text: str, facts_text: str
+) -> str:
+    """
+    Ensure Section A / Application Documents contains a witness statement
+    row for each applicant inferred from the user text, and that those rows
+    appear as the *last* document rows in that section.
+
+    Works on 7-column TSV (pre-numbering).
+    Behaviour:
+    - Find the Application Documents section.
+    - Remove any existing witness-statement rows in that section.
+    - Append one witness statement row per inferred applicant *before*
+      the next section heading (or end of file).
+    """
+    lines = tsv_text.splitlines()
+    if not lines:
+        return tsv_text
+
+    # 1. Locate the Application Documents section
+    section_start = None
+    section_end = len(lines)
+
+    for i, line in enumerate(lines):
+        cols = line.split("\t")
+        if len(cols) < 7:
+            cols += [""] * (7 - len(cols))
+        heading = cols[0].lstrip("'").strip().lower()
+
+        # Fuzzy match – before relettering it will usually be
+        # "Section: Application Documents" or similar
+        if heading.startswith("section") and "application" in heading and "document" in heading:
+            section_start = i
+            break
+
+    if section_start is None:
+        # No Application Documents section found
+        return tsv_text
+
+    # Find the next section heading after Application Documents
+    for j in range(section_start + 1, len(lines)):
+        c0 = lines[j].split("\t")[0].lstrip("'").strip().lower()
+        if c0.startswith("section"):
+            section_end = j
+            break
+
+    # 2. Build prefix: keep everything up to the end of Section A,
+    # but strip any existing witness statement rows inside that section
+    new_lines = []
+
+    # Everything before the section heading stays as-is
+    new_lines.extend(lines[: section_start + 1])
+
+    # Inside Section A: keep non–witness-statement rows only
+    for k in range(section_start + 1, section_end):
+        c0 = lines[k].split("\t")[0].lstrip("'").strip().lower()
+        if "witness statement" in c0:
+            # Drop existing witness statement rows in Section A
+            continue
+        new_lines.append(lines[k])
+
+    # 3. Append new witness statement rows at the end of Section A
+    labels = infer_applicant_labels(route_text, facts_text)
+    for label in labels:
+        doc_name = f"{label}'s Witness Statement"
+        row = [
+            doc_name,
+            "Signed witness statement setting out relevant background, facts and explanations in support of the application.",
+            "We will draft this with you. Please check the content carefully, ensure it is accurate and complete, then sign and date it.",
+            "",
+            "",
+            "",
+            "No specific rule requiring a witness statement; recommended advocacy document to explain facts and address discretion.",
+        ]
+        new_lines.append("\t".join(row))
+
+    # 4. Append the rest of the DSS (sections after Application Documents)
+    new_lines.extend(lines[section_end:])
+
+    return "\n".join(new_lines)
+
+
+def remove_legal_submissions_rows(tsv_text: str) -> str:
+    """
+    Remove any document rows that are effectively 'Legal Submissions' /
+    'cover letter' / 'advocacy letter' from the DSS.
+
+    - Leaves section headings and other rows untouched.
+    - Works on 7-column TSV (pre-numbering).
+    """
+    lines = tsv_text.splitlines()
+    if not lines:
+        return tsv_text
+
+    out = []
+    # Keep header
+    out.append(lines[0])
+
+    for i, line in enumerate(lines[1:], start=1):
+        cols = line.split("\t")
+        if len(cols) < 7:
+            cols += [""] * (7 - len(cols))
+
+        doc_cell_raw = cols[0]
+        doc_cell = doc_cell_raw.lstrip("'").strip().lower()
+
+        # Keep section/filtered headings
+        if is_section_heading_row([doc_cell_raw]):
+            out.append(line)
+            continue
+
+        # Blank / non-document rows pass through
+        if not doc_cell:
+            out.append(line)
+            continue
+
+        # Detect legal submissions / cover letters / advocacy letters
+        if (
+            "legal submissions" in doc_cell
+            or "cover letter" in doc_cell
+            or "covering letter" in doc_cell
+            or "advocacy letter" in doc_cell
+        ):
+            # Skip this row entirely
+            continue
+
+        out.append(line)
+
+    return "\n".join(out).strip()
+
+
+# =========================
+# Section heading + layout helpers
+# =========================
 
 def reletter_section_headings(tsv_text: str) -> str:
     """
@@ -949,7 +1152,7 @@ def move_col_g_to_h(tsv_text: str) -> str:
 
         out.append("\t".join(cols))
 
-    return "\n".join(out).strip()
+    return "\n".join(out)
 
 
 def tsv_to_dataframe(tsv_text: str) -> pd.DataFrame:
@@ -1265,6 +1468,10 @@ if submit and (route.strip() or facts.strip()):
 
         reply = sanitize_for_sheets(reply)
         reply = standardise_document_names(reply)
+        # Ensure witness statements are added as the last docs in Section A
+        reply = ensure_witness_statements_in_section_a(reply, route, facts)
+        # Remove Legal Submissions / cover letter / advocacy letter rows entirely
+        reply = remove_legal_submissions_rows(reply)
         reply = reletter_section_headings(reply)
         reply = remove_blank_rows(reply)
         reply = add_numbering_column(reply)
@@ -1364,3 +1571,4 @@ AI-generated content must not be relied upon without human review. Where such co
             st.session_state["feedback_text_area"] = ""
         else:
             st.warning("Please enter some feedback before submitting.")
+
