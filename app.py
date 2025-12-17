@@ -403,6 +403,11 @@ Hard rules:
 - Quote/cite the exact relevant paragraph(s).
 - Always reflect the April 2024 Appendix FM financial requirement (£29,000).
 - Do NOT say two passport-sized photos are required.
+- You MUST NOT produce a single combined document row for BRP and eVisa status.
+- Instead, wherever current status and past BRPs are relevant, you MUST create TWO separate document rows:
+  1) "Current Home Office eVisa status printout"
+  2) "Previous BRPs"
+- Do NOT refer to "Current BRP (if held)" in any document name. Assume status is now evidenced digitally via eVisa.
 - If you are unsure whether a requirement applies, or you cannot find clear supporting rule text, you must treat that requirement as “Recommended (not mandatory)” and say so in Column G.
 - You must not create maintenance / English language / accommodation requirements based solely on your general training; they must appear in the Rules or guidance you have been given.
 - You MUST treat any “ROUTE-SPECIFIC CORRECTIONS / OVERRIDES” in the system/context as overriding your general knowledge for that route. Where there is a conflict, follow the corrections.
@@ -742,6 +747,60 @@ def standardise_document_names(tsv_text: str) -> str:
                 cols[0] = "Legal Submissions"
 
         out.append("\t".join(cols))
+
+    return "\n".join(out).strip()
+
+
+def split_brp_evisa_rows(tsv_text: str) -> str:
+    """
+    If the model has produced a single combined BRP/eVisa document row
+    (e.g. 'Current BRP (if held) and/or Home Office eVisa status printout'),
+    replace that *one* row with TWO rows:
+      - 'Current Home Office eVisa status printout'
+      - 'Previous BRPs'
+    Reuses the same columns B–G for both rows.
+    """
+    lines = tsv_text.splitlines()
+    if not lines:
+        return tsv_text
+
+    out = []
+    # Keep header as-is
+    out.append(lines[0])
+
+    for line in lines[1:]:
+        cols = line.split("\t")
+        if len(cols) < 7:
+            cols = cols + [""] * (7 - len(cols))
+        elif len(cols) > 7:
+            cols = cols[:6] + [" ".join(cols[6:])]
+
+        doc_raw = cols[0]
+        doc_cell = doc_raw.lstrip("'").strip().lower()
+
+        # Leave section headings etc. alone
+        if is_section_heading_row([doc_raw]):
+            out.append("\t".join(cols))
+            continue
+
+        # Detect a combined BRP + eVisa line
+        has_brp = "brp" in doc_cell
+        has_evisa = any(
+            token in doc_cell
+            for token in ["evisa", "e-visa", "e visa"]
+        )
+
+        if has_brp and has_evisa:
+            # Use same evidential requirements / notes / authority for both rows
+            common_cols = cols[1:]  # B–G
+
+            row_evisa = ["Current Home Office eVisa status printout"] + common_cols
+            row_brp = ["Previous BRPs"] + common_cols
+
+            out.append("\t".join(row_evisa))
+            out.append("\t".join(row_brp))
+        else:
+            out.append("\t".join(cols))
 
     return "\n".join(out).strip()
 
@@ -1494,6 +1553,8 @@ if submit and (route.strip() or facts.strip()):
         reply = sanitize_for_sheets(reply)
         reply = remove_duplicate_header_rows(reply)  # <-- NEW LINE
         reply = standardise_document_names(reply)
+        # Split any combined BRP / eVisa row into two separate rows
+        reply = split_brp_evisa_rows(reply)
         # Ensure witness statements are added as the last docs in Section A
         reply = ensure_witness_statements_in_section_a(reply, route, facts)
         # Remove Legal Submissions / cover letter / advocacy letter rows entirely
@@ -1503,7 +1564,6 @@ if submit and (route.strip() or facts.strip()):
         reply = add_numbering_column(reply)
         reply = add_ready_checkboxes(reply)
         reply = move_col_g_to_h(reply)
-
 
         # Store in session_state so it persists across reruns
         st.session_state["tsv"] = reply
@@ -1597,4 +1657,5 @@ AI-generated content must not be relied upon without human review. Where such co
             st.session_state["feedback_text_area"] = ""
         else:
             st.warning("Please enter some feedback before submitting.")
+
 
