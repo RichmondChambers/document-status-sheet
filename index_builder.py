@@ -6,6 +6,7 @@ import pickle
 import time
 import datetime
 from typing import List, Dict, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import faiss
@@ -34,13 +35,66 @@ INDEX_FILE = "faiss_index.index"
 METADATA_FILE = "metadata.pkl"
 STATE_FILE = "drive_index_state.json"
 
-# ✅ Check Drive at most once per day (global cooldown)
-CHECK_COOLDOWN_SECONDS = 24 * 60 * 60  # 1 day
+DEFAULT_COOLDOWN_SECONDS = 24 * 60 * 60  # 1 day
+DEFAULT_OVERNIGHT_START_HOUR_UK = 1  # 01:00 UK time
+DEFAULT_OVERNIGHT_END_HOUR_UK = 6    # 06:00 UK time
 
 
 def get_openai_client() -> OpenAI:
     """Create an OpenAI client using Streamlit secrets."""
     return OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+
+
+def get_secret_value(key: str, default):
+    """Safely fetch a Streamlit secret, falling back to a default when missing."""
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
+
+
+def get_drive_sync_cooldown_seconds() -> float:
+    """Return configurable cooldown in seconds (defaults to 24h)."""
+    hours = get_secret_value("drive_sync_cooldown_hours", DEFAULT_COOLDOWN_SECONDS / 3600)
+    try:
+        return max(0.0, float(hours)) * 3600
+    except (TypeError, ValueError):
+        return DEFAULT_COOLDOWN_SECONDS
+
+
+def get_uk_overnight_window_hours() -> Tuple[int, int]:
+    """Return (start_hour, end_hour) for the UK overnight window (0-23 inclusive)."""
+    start = get_secret_value("drive_sync_overnight_start_hour", DEFAULT_OVERNIGHT_START_HOUR_UK)
+    end = get_secret_value("drive_sync_overnight_end_hour", DEFAULT_OVERNIGHT_END_HOUR_UK)
+
+    try:
+        start_int = int(start)
+        end_int = int(end)
+        start_int = max(0, min(23, start_int))
+        end_int = max(0, min(23, end_int))
+        return start_int, end_int
+    except (TypeError, ValueError):
+        return DEFAULT_OVERNIGHT_START_HOUR_UK, DEFAULT_OVERNIGHT_END_HOUR_UK
+
+
+def is_within_uk_overnight_window(now_utc: Optional[datetime.datetime] = None) -> bool:
+    """Determine if the given (or current) UTC time falls within the UK overnight window."""
+    if now_utc is None:
+        now_utc = datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc)
+
+    uk_tz = ZoneInfo("Europe/London")
+    now_uk = now_utc.astimezone(uk_tz)
+
+    start_hour, end_hour = get_uk_overnight_window_hours()
+
+    if start_hour == end_hour:
+        return True  # full-day window
+
+    if start_hour < end_hour:
+        return start_hour <= now_uk.hour < end_hour
+
+    # Window crosses midnight (e.g., 22 -> 5)
+    return now_uk.hour >= start_hour or now_uk.hour < end_hour
 
 
 def get_drive_service():
@@ -422,20 +476,38 @@ def rebuild_index_from_drive(tagged_files: List[Tuple[Dict, str]]):
         pickle.dump(metadata, f)
 
 
-def sync_drive_and_rebuild_index_if_needed():
+def sync_drive_and_rebuild_index_if_needed(
+    *,
+    bypass_cooldown: bool = False,
+    respect_overnight_window: bool = True,
+):
     """
     Check ONLY the two target folders for new/updated files; rebuild if changed.
-    Debounced: will not check Drive more than once per day globally.
+
+    Controls:
+      - Cooldown: by default uses a configurable cooldown to avoid repeated Drive scans.
+      - Overnight window: optionally skip Drive checks outside a UK overnight window to
+        keep daytime sessions snappy. Missing artifacts always trigger a rebuild.
+      - bypass_cooldown: set True for scheduled off-peak runs that should always check.
     """
     previous_state = load_previous_state()
 
+    artifacts_missing = not os.path.exists(INDEX_FILE) or not os.path.exists(METADATA_FILE)
+
+    # ---- UK OVERNIGHT WINDOW GUARD (opt-out) ----
+    if respect_overnight_window and not artifacts_missing:
+        if not is_within_uk_overnight_window():
+            return False
+    # --------------------------------------------
+
     # ---- DAILY COOLDOWN ----
     last_checked = previous_state.get("last_checked")
-    if last_checked:
+    cooldown_seconds = get_drive_sync_cooldown_seconds()
+    if last_checked and not bypass_cooldown:
         try:
             last_checked_dt = datetime.datetime.fromisoformat(last_checked.replace("Z", ""))
             age_seconds = (datetime.datetime.utcnow() - last_checked_dt).total_seconds()
-            if age_seconds < CHECK_COOLDOWN_SECONDS:
+            if age_seconds < cooldown_seconds:
                 return False
         except Exception:
             pass
