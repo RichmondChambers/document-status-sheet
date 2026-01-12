@@ -751,6 +751,46 @@ def standardise_document_names(tsv_text: str) -> str:
     return "\n".join(out).strip()
 
 
+def enforce_application_form_client_notes(tsv_text: str) -> str:
+    """
+    Ensure client notes for any application form document rows use the
+    firm-standard wording.
+    """
+    lines = tsv_text.splitlines()
+    if not lines:
+        return tsv_text
+
+    preferred_text = (
+        "We will complete the online application form for your review. Where we have "
+        "questions we will provide you with a questionnaire. You will review the draft "
+        "form prior to submission."
+    )
+
+    out = []
+    for i, line in enumerate(lines):
+        cols = line.split("\t")
+        if len(cols) < 7:
+            cols = cols + [""] * (7 - len(cols))
+        elif len(cols) > 7:
+            cols = cols[:6] + [" ".join(cols[6:])]
+
+        if i == 0:
+            out.append("\t".join(cols))
+            continue
+
+        doc_cell_raw = cols[0]
+        doc_cell = doc_cell_raw.lstrip("'").strip().lower()
+
+        if doc_cell and not is_section_heading_row([doc_cell_raw]):
+            if "application form" in doc_cell or "online application" in doc_cell:
+                if "confirmation" not in doc_cell and "receipt" not in doc_cell:
+                    cols[2] = preferred_text
+
+        out.append("\t".join(cols))
+
+    return "\n".join(out).strip()
+
+
 def split_brp_evisa_rows(tsv_text: str) -> str:
     """
     If the model has produced a single combined BRP/eVisa document row
@@ -1553,6 +1593,7 @@ if submit and (route.strip() or facts.strip()):
         reply = sanitize_for_sheets(reply)
         reply = remove_duplicate_header_rows(reply)  # <-- NEW LINE
         reply = standardise_document_names(reply)
+        reply = enforce_application_form_client_notes(reply)
         # Split any combined BRP / eVisa row into two separate rows
         reply = split_brp_evisa_rows(reply)
         # Ensure witness statements are added as the last docs in Section A
@@ -1657,5 +1698,3 @@ AI-generated content must not be relied upon without human review. Where such co
             st.session_state["feedback_text_area"] = ""
         else:
             st.warning("Please enter some feedback before submitting.")
-
-
