@@ -12,6 +12,8 @@ import base64
 import pandas as pd
 import io
 import string
+import datetime
+from typing import Optional
 
 from index_builder import sync_drive_and_rebuild_index_if_needed, INDEX_FILE, METADATA_FILE
 
@@ -105,6 +107,44 @@ user_email = google_login()
 # 2. FAISS + metadata
 # =========================
 
+def parse_iso_timestamp(value: str) -> Optional[datetime.datetime]:
+    try:
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def format_timestamp(dt: datetime.datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def get_last_rebuilt_timestamp() -> str:
+    timestamp: Optional[datetime.datetime] = None
+
+    try:
+        with open("drive_index_state.json", "r") as f:
+            state = json.load(f)
+            last_rebuilt = state.get("last_rebuilt")
+            if last_rebuilt:
+                timestamp = parse_iso_timestamp(last_rebuilt)
+    except Exception:
+        timestamp = None
+
+    if timestamp is None:
+        try:
+            index_mtime = Path(INDEX_FILE).stat().st_mtime
+            timestamp = datetime.datetime.fromtimestamp(
+                index_mtime,
+                tz=datetime.timezone.utc,
+            )
+        except FileNotFoundError:
+            return "Unknown"
+
+    return format_timestamp(timestamp)
+
+
 @st.cache_resource
 def load_index_and_metadata():
     """
@@ -117,12 +157,7 @@ def load_index_and_metadata():
     with open(METADATA_FILE, "rb") as f:
         metadata = pickle.load(f)
 
-    try:
-        with open("drive_index_state.json", "r") as f:
-            state = json.load(f)
-            last_rebuilt = state.get("last_rebuilt", "Unknown")
-    except Exception:
-        last_rebuilt = "Unknown"
+    last_rebuilt = get_last_rebuilt_timestamp()
 
     return index, metadata, last_rebuilt
 
